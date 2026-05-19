@@ -13,8 +13,8 @@ A Laravel package for SSO integration with Authentik using SCIM provisioning.
 
 ## Requirements
 
-- PHP 8.2 or higher
-- Laravel 11.0 or 12.0
+- PHP 8.1 or higher
+- Laravel 10.0, 11.0, 12.0, or 13.0
 - Authentik instance with SCIM and OAuth configured
 
 ## Installation
