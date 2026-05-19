@@ -27,11 +27,10 @@ class QuadSSOServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
-        // Load routes with 'web' middleware group for session support
-        // SSO authentication requires sessions for OAuth state management
-        Route::middleware('web')->group(function () {
-            $this->loadRoutesFrom(__DIR__ . '/../routes/quadsso.php');
-        });
+        // Route file applies its own middleware per route — see routes/quadsso.php
+        // for why SLO must stay outside the 'web' group (CSRF would reject every
+        // back-channel logout from Authentik with HTTP 419).
+        $this->loadRoutesFrom(__DIR__ . '/../routes/quadsso.php');
 
         // Register migrations
         $this->loadMigrationsFrom(__DIR__ . '/../database/migrations');
