@@ -5,6 +5,58 @@ All notable changes to QuadSSO will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-05-18
+
+### 🎉 MAJOR FIX: Works with Laravel's Default Schema
+
+**BREAKING CHANGE (Fix):** Default field mappings now work with Laravel's standard `users` table schema.
+
+**Previous Issue:**
+- Default config mapped to non-existent columns (`name_first`, `name_last`, `phone_cell`, etc.)
+- SCIM provisioning failed with "column does not exist" SQL errors on fresh Laravel installs
+- Config claimed "set to null to disable" but null values fell through to column names
+
+**What's Fixed:**
+- ✅ Default config now maps to Laravel's standard `name` column (works out-of-the-box)
+- ✅ SCIM `givenName` and `familyName` automatically combine into single `name` field
+- ✅ Extended fields (`name_first`, `name_last`, etc.) are now **opt-in** via optional migration
+- ✅ Null mappings are properly honored - attributes are skipped when mapping is null
+- ✅ Schema validation added: warns about missing columns before SCIM requests fail
+
+### Added
+
+- Optional extended fields migration (`2024_01_01_000002_add_extended_quadsso_fields_to_users_table.php`)
+- Automatic schema validation on boot (logs warnings for missing columns)
+- Smart name field handling: works with single `name` or separate `name_first`/`name_last` columns
+- Helper methods for conditional SCIM attribute inclusion
+- Documentation for extended fields setup
+
+### Changed
+
+- **BREAKING:** Default `field_mappings` config changed to work with Laravel's standard schema
+  - `name_first`, `name_last`, `name_middle` now default to `null` (disabled)
+  - Added `'name' => 'name'` mapping for Laravel's standard field
+  - `phone_cell`, `email_secondary` now default to `null` (disabled)
+- Updated `QuadSSOScimConfig` to properly handle null mappings
+- Refactored name attribute building to support both single and split name fields
+
+### Fixed
+
+- SCIM provisioning no longer fails on fresh Laravel installs
+- Null field mappings are now properly skipped (no SQL errors)
+- Schema mismatches are caught early with clear error messages
+
+### Migration Guide
+
+If you published the config before v1.2.0 and have custom columns:
+1. Your existing config with custom mappings will continue to work
+2. If you see schema validation warnings, either:
+   - Run the extended migration to add the columns, OR
+   - Set unused mappings to `null` in your config
+
+For fresh installs:
+- No action needed - works with Laravel's default schema out-of-the-box
+
 ## [1.1.0] - 2026-05-18
 
 ### 🔒 CRITICAL SECURITY FIX

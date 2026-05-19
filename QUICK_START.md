@@ -55,6 +55,7 @@ Add to your User model's `$fillable` array:
 
 ```php
 protected $fillable = [
+    'name',              // Laravel's default (works out of the box)
     'email',
     'password',
     'scim_external_id',  // Added by migration
@@ -64,7 +65,9 @@ protected $fillable = [
 ];
 ```
 
-> **✅ NOTE:** The migration automatically creates `scim_external_id`, `email_verified_at`, and `status` columns if they don't exist.
+> **✅ NOTE:** The package works with Laravel's standard users table schema (single `name` column). SCIM's `givenName` and `familyName` are automatically combined into the `name` field.
+>
+> **Optional:** If you want separate `name_first`, `name_last`, `name_middle`, `phone_cell`, and `email_secondary` columns, see the "Extended Fields" section in the full README.
 
 ## Step 4: Set Up Authentik (4 minutes)
 

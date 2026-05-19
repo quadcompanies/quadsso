@@ -100,24 +100,35 @@ return [
     |--------------------------------------------------------------------------
     |
     | Map SCIM/Authentik fields to your User model fields.
-    | Set to null to disable mapping for that field.
+    | Set to null to disable mapping for that field (the SCIM attribute will be ignored).
+    |
+    | Default mappings work with Laravel's standard users table schema.
+    | If you have custom columns (name_first, name_last, phone_cell, etc.),
+    | uncomment and configure those mappings below.
     |
     */
 
     'field_mappings' => [
-        // Core fields
+        // Core fields (required)
         'email' => 'email',
         'external_id' => 'scim_external_id',
         'email_verified_at' => 'email_verified_at',
 
-        // Name fields
-        'name_first' => 'name_first',
-        'name_last' => 'name_last',
-        'name_middle' => 'name_middle',
+        // Name fields - Laravel's default users table only has a single 'name' column
+        // To use these, add the columns to your users table first:
+        //   php artisan make:migration add_name_fields_to_users_table
+        'name_first' => null,  // Set to 'name_first' if you have this column
+        'name_last' => null,   // Set to 'name_last' if you have this column
+        'name_middle' => null, // Set to 'name_middle' if you have this column
 
-        // Contact fields
-        'phone_cell' => 'phone_cell',
-        'email_secondary' => 'email_secondary',
+        // Full name mapping (uses Laravel's default 'name' column)
+        // This is a computed field that combines firstName + lastName from SCIM
+        'name' => 'name',
+
+        // Contact fields - Not in Laravel's default schema
+        // To use these, add the columns to your users table first
+        'phone_cell' => null,      // Set to 'phone_cell' if you have this column
+        'email_secondary' => null, // Set to 'email_secondary' if you have this column
     ],
 
     /*

@@ -46,6 +46,8 @@ This adds:
 - `email_verified_at` - Standard Laravel email verification field (if not already present)
 - `status` - User status field (default: 'active') for SCIM user blocking
 
+**The package works out-of-the-box with Laravel's standard users table** (single `name` field). SCIM's `givenName` and `familyName` are automatically combined into the `name` column.
+
 ### 4. Update Your User Model
 
 Ensure your User model includes the necessary fields in `$fillable`:
@@ -295,6 +297,57 @@ SCIM routes are automatically registered by the `laravel-scim-server` package:
 4. **Remember tokens cycled** → "Remember me" cookies are invalidated
 
 ## Customization
+
+### Extended User Fields (Optional)
+
+By default, QuadSSO maps SCIM name fields to Laravel's standard single `name` column. If you want separate fields for first/last/middle names and additional contact fields:
+
+**1. Run the optional extended fields migration:**
+
+```bash
+php artisan migrate --path=vendor/quadcompanies/quadsso/database/migrations/2024_01_01_000002_add_extended_quadsso_fields_to_users_table.php
+```
+
+This adds: `name_first`, `name_last`, `name_middle`, `phone_cell`, `email_secondary`
+
+**2. Update `config/quadsso.php` to enable these mappings:**
+
+```php
+'field_mappings' => [
+    'email' => 'email',
+    'external_id' => 'scim_external_id',
+    'email_verified_at' => 'email_verified_at',
+    
+    // Enable extended name fields
+    'name_first' => 'name_first',   // Changed from null
+    'name_last' => 'name_last',     // Changed from null
+    'name_middle' => 'name_middle', // Changed from null
+    'name' => null,                 // Disable single name field
+    
+    // Enable contact fields
+    'phone_cell' => 'phone_cell',           // Changed from null
+    'email_secondary' => 'email_secondary', // Changed from null
+],
+```
+
+**3. Add to User model's `$fillable`:**
+
+```php
+protected $fillable = [
+    'email',
+    'password',
+    'scim_external_id',
+    'email_verified_at',
+    'status',
+    'name_first',
+    'name_last',
+    'name_middle',
+    'phone_cell',
+    'email_secondary',
+];
+```
+
+> **⚠️ Schema Validation:** The package automatically checks if configured field mappings exist in your database schema. If you see warnings in your logs about missing columns, either run the extended migration or set those mappings to `null` in the config.
 
 ### Custom User Model
 

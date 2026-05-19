@@ -155,45 +155,20 @@ class QuadSSOScimConfig extends SCIMConfig
                 })->ensure('boolean')->default(true),
 
                 // name sub-attributes
-                complex('name')->withSubAttributes(
-                    eloquent('givenName', $fieldMappings['name_first'] ?? 'name_first')->ensure('nullable'),
-                    eloquent('familyName', $fieldMappings['name_last'] ?? 'name_last')->ensure('nullable'),
-                    eloquent('middleName', $fieldMappings['name_middle'] ?? 'name_middle')->ensure('nullable'),
-
-                    // formatted is a computed read-only display field
-                    (new class ($fieldMappings) extends Attribute {
-                        public function __construct(protected array $fieldMappings)
-                        {
-                            parent::__construct('formatted');
-                        }
-
-                        protected function doRead(&$object, $attributes = []): string
-                        {
-                            $firstNameField = $this->fieldMappings['name_first'] ?? 'name_first';
-                            $lastNameField = $this->fieldMappings['name_last'] ?? 'name_last';
-                            return trim(($object->$firstNameField ?? '') . ' ' . ($object->$lastNameField ?? ''));
-                        }
-
-                        public function add($value, Model &$object): void
-                        {
-                            // formatted is computed — write is a no-op
-                        }
-
-                        public function replace($value, Model &$object, $path = null, $removeIfNotSet = false): void
-                        {
-                            // formatted is computed — write is a no-op
-                        }
-                    }),
-                ),
+                $this->buildNameAttribute($fieldMappings),
 
                 // emails multi-value, primary email
                 $this->buildEmailsAttribute($fieldMappings),
 
-                // phoneNumbers — mobile maps to phone_cell
-                $this->buildPhoneNumbersAttribute($fieldMappings),
+                // phoneNumbers — mobile maps to phone_cell (if configured)
+                ...($this->shouldIncludePhoneNumbers($fieldMappings)
+                    ? [$this->buildPhoneNumbersAttribute($fieldMappings)]
+                    : []),
 
-                // other — recovery_email maps to email_secondary
-                $this->buildOtherAttribute($fieldMappings),
+                // other — recovery_email maps to email_secondary (if configured)
+                ...($this->shouldIncludeEmailSecondary($fieldMappings)
+                    ? [$this->buildOtherAttribute($fieldMappings)]
+                    : []),
 
                 // password — never returned; on create, ignored (observer sets a random one)
                 (new class () extends Attribute {
@@ -215,6 +190,185 @@ class QuadSSOScimConfig extends SCIMConfig
                 })->setReturned('never'),
             ),
         );
+    }
+
+    /**
+     * Build the name attribute with proper null handling.
+     */
+    protected function buildNameAttribute(array $fieldMappings): Complex
+    {
+        $hasNameFirst = isset($fieldMappings['name_first']) && $fieldMappings['name_first'] !== null;
+        $hasNameLast = isset($fieldMappings['name_last']) && $fieldMappings['name_last'] !== null;
+        $hasNameMiddle = isset($fieldMappings['name_middle']) && $fieldMappings['name_middle'] !== null;
+        $hasFullName = isset($fieldMappings['name']) && $fieldMappings['name'] !== null;
+
+        $subAttributes = [];
+
+        // Add givenName (first name) if mapped
+        if ($hasNameFirst) {
+            $subAttributes[] = eloquent('givenName', $fieldMappings['name_first'])->ensure('nullable');
+        } else {
+            // If using full 'name' field, extract first name from it
+            if ($hasFullName) {
+                $subAttributes[] = $this->buildGivenNameExtractor($fieldMappings['name']);
+            }
+        }
+
+        // Add familyName (last name) if mapped
+        if ($hasNameLast) {
+            $subAttributes[] = eloquent('familyName', $fieldMappings['name_last'])->ensure('nullable');
+        } else {
+            // If using full 'name' field, extract last name from it
+            if ($hasFullName) {
+                $subAttributes[] = $this->buildFamilyNameExtractor($fieldMappings['name']);
+            }
+        }
+
+        // Add middleName if mapped
+        if ($hasNameMiddle) {
+            $subAttributes[] = eloquent('middleName', $fieldMappings['name_middle'])->ensure('nullable');
+        }
+
+        // Add formatted name (computed or from full name field)
+        $subAttributes[] = $this->buildFormattedName($fieldMappings);
+
+        return complex('name')->withSubAttributes(...$subAttributes);
+    }
+
+    /**
+     * Build givenName extractor for single 'name' column.
+     */
+    protected function buildGivenNameExtractor(string $nameField): Attribute
+    {
+        return new class ($nameField) extends Attribute {
+            public function __construct(protected string $nameField)
+            {
+                parent::__construct('givenName');
+            }
+
+            protected function doRead(&$object, $attributes = []): ?string
+            {
+                $fullName = $object->{$this->nameField} ?? '';
+                $parts = explode(' ', trim($fullName), 2);
+                return $parts[0] ?? null;
+            }
+
+            public function add($value, Model &$object): void
+            {
+                $this->updateFullName($value, null, $object);
+            }
+
+            public function replace($value, Model &$object, $path = null, $removeIfNotSet = false): void
+            {
+                $this->updateFullName($value, null, $object);
+            }
+
+            protected function updateFullName(?string $givenName, ?string $familyName, Model &$object): void
+            {
+                // Get current name parts
+                $currentName = $object->{$this->nameField} ?? '';
+                $parts = explode(' ', trim($currentName), 2);
+                $currentFirst = $parts[0] ?? '';
+                $currentLast = $parts[1] ?? '';
+
+                // Update with new values
+                $newFirst = $givenName ?? $currentFirst;
+                $newLast = $familyName ?? $currentLast;
+
+                $object->{$this->nameField} = trim("$newFirst $newLast");
+                $this->dirty = true;
+            }
+        };
+    }
+
+    /**
+     * Build familyName extractor for single 'name' column.
+     */
+    protected function buildFamilyNameExtractor(string $nameField): Attribute
+    {
+        return new class ($nameField) extends Attribute {
+            public function __construct(protected string $nameField)
+            {
+                parent::__construct('familyName');
+            }
+
+            protected function doRead(&$object, $attributes = []): ?string
+            {
+                $fullName = $object->{$this->nameField} ?? '';
+                $parts = explode(' ', trim($fullName), 2);
+                return $parts[1] ?? null;
+            }
+
+            public function add($value, Model &$object): void
+            {
+                $this->updateFullName(null, $value, $object);
+            }
+
+            public function replace($value, Model &$object, $path = null, $removeIfNotSet = false): void
+            {
+                $this->updateFullName(null, $value, $object);
+            }
+
+            protected function updateFullName(?string $givenName, ?string $familyName, Model &$object): void
+            {
+                // Get current name parts
+                $currentName = $object->{$this->nameField} ?? '';
+                $parts = explode(' ', trim($currentName), 2);
+                $currentFirst = $parts[0] ?? '';
+                $currentLast = $parts[1] ?? '';
+
+                // Update with new values
+                $newFirst = $givenName ?? $currentFirst;
+                $newLast = $familyName ?? $currentLast;
+
+                $object->{$this->nameField} = trim("$newFirst $newLast");
+                $this->dirty = true;
+            }
+        };
+    }
+
+    /**
+     * Build formatted name (computed display field).
+     */
+    protected function buildFormattedName(array $fieldMappings): Attribute
+    {
+        return new class ($fieldMappings) extends Attribute {
+            public function __construct(protected array $fieldMappings)
+            {
+                parent::__construct('formatted');
+            }
+
+            protected function doRead(&$object, $attributes = []): string
+            {
+                // If we have separate name fields, use those
+                if (isset($this->fieldMappings['name_first']) && $this->fieldMappings['name_first'] !== null) {
+                    $firstNameField = $this->fieldMappings['name_first'];
+                    $lastNameField = $this->fieldMappings['name_last'] ?? null;
+
+                    $firstName = $object->$firstNameField ?? '';
+                    $lastName = $lastNameField ? ($object->$lastNameField ?? '') : '';
+
+                    return trim("$firstName $lastName");
+                }
+
+                // Otherwise use the full name field
+                if (isset($this->fieldMappings['name']) && $this->fieldMappings['name'] !== null) {
+                    return $object->{$this->fieldMappings['name']} ?? '';
+                }
+
+                return '';
+            }
+
+            public function add($value, Model &$object): void
+            {
+                // formatted is computed — write is a no-op
+            }
+
+            public function replace($value, Model &$object, $path = null, $removeIfNotSet = false): void
+            {
+                // formatted is computed — write is a no-op
+            }
+        };
     }
 
     /**
@@ -260,11 +414,27 @@ class QuadSSOScimConfig extends SCIMConfig
     }
 
     /**
+     * Check if phoneNumbers attribute should be included.
+     */
+    protected function shouldIncludePhoneNumbers(array $fieldMappings): bool
+    {
+        return isset($fieldMappings['phone_cell']) && $fieldMappings['phone_cell'] !== null;
+    }
+
+    /**
+     * Check if email_secondary attribute should be included.
+     */
+    protected function shouldIncludeEmailSecondary(array $fieldMappings): bool
+    {
+        return isset($fieldMappings['email_secondary']) && $fieldMappings['email_secondary'] !== null;
+    }
+
+    /**
      * Build the phoneNumbers attribute.
      */
     protected function buildPhoneNumbersAttribute(array $fieldMappings): Complex
     {
-        $phoneCellField = $fieldMappings['phone_cell'] ?? 'phone_cell';
+        $phoneCellField = $fieldMappings['phone_cell'];
 
         return (new class ($phoneCellField) extends Complex {
             public function __construct(protected string $phoneCellField)
@@ -307,7 +477,7 @@ class QuadSSOScimConfig extends SCIMConfig
      */
     protected function buildOtherAttribute(array $fieldMappings): Complex
     {
-        $emailSecondaryField = $fieldMappings['email_secondary'] ?? 'email_secondary';
+        $emailSecondaryField = $fieldMappings['email_secondary'];
 
         return (new class ($emailSecondaryField) extends Complex {
             public function __construct(protected string $emailSecondaryField)

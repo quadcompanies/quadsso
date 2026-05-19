@@ -6,6 +6,8 @@ use ArieTimmerman\Laravel\SCIMServer\SCIMConfig;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
 use QuadCompanies\QuadSSO\Scim\QuadSSOScimConfig;
@@ -51,6 +53,9 @@ class QuadSSOServiceProvider extends ServiceProvider
 
         // Set up User model observer for SCIM provisioning
         $this->registerUserObserver();
+
+        // Validate schema configuration
+        $this->validateSchemaConfiguration();
     }
 
     /**
@@ -108,5 +113,52 @@ class QuadSSOServiceProvider extends ServiceProvider
                 }
             }
         });
+    }
+
+    /**
+     * Validate that configured field mappings match the database schema.
+     * Logs warnings for missing columns instead of throwing exceptions to allow
+     * developers to publish config first before running migrations.
+     */
+    protected function validateSchemaConfiguration(): void
+    {
+        // Skip validation in console commands (migrations, etc.) to avoid chicken-egg issues
+        if ($this->app->runningInConsole() && !$this->app->runningUnitTests()) {
+            return;
+        }
+
+        // Skip if database isn't available yet
+        try {
+            if (!Schema::hasTable('users')) {
+                return;
+            }
+        } catch (\Exception $e) {
+            return;
+        }
+
+        $fieldMappings = config('quadsso.field_mappings', []);
+        $missingColumns = [];
+
+        // Check each non-null mapping to ensure the column exists
+        foreach ($fieldMappings as $scimField => $dbColumn) {
+            if ($dbColumn !== null && !Schema::hasColumn('users', $dbColumn)) {
+                $missingColumns[] = [
+                    'scim_field' => $scimField,
+                    'column' => $dbColumn,
+                ];
+            }
+        }
+
+        if (!empty($missingColumns)) {
+            $columnList = collect($missingColumns)
+                ->map(fn($item) => "'{$item['column']}' (mapped from SCIM '{$item['scim_field']}')")
+                ->join(', ');
+
+            Log::warning(
+                "QuadSSO: Missing database columns in 'users' table: $columnList. " .
+                "SCIM provisioning may fail. Either add these columns via migration, " .
+                "or set their mappings to null in config/quadsso.php to disable them."
+            );
+        }
     }
 }
