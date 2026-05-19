@@ -5,6 +5,14 @@ All notable changes to QuadSSO will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-05-18
+
+### Fixed
+
+- PHP syntax error: "Cannot use positional argument after argument unpacking" in QuadSSOScimConfig.php:171
+- Refactored attribute building to use array collection instead of mixed spread/positional arguments
+- SCIM configuration now loads without PHP errors
+
 ## [1.2.1] - 2026-05-18
 
 ### 🔒 CRITICAL FIX: SSO Routes Now Have Session Support

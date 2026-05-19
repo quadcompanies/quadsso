@@ -95,101 +95,117 @@ class QuadSSOScimConfig extends SCIMConfig
             new Meta('Users'),
 
             (new AttributeSchema(Schema::SCHEMA_USER, true))->withSubAttributes(
-
-                // userName maps to email (authentik sends email as userName)
-                eloquent('userName', $fieldMappings['email'] ?? 'email')->ensure('required', 'email'),
-
-                // active maps to our status field (active/blocked)
-                (new class ($statusField, $activeValue, $blockedValue, $invalidateSessions) extends Attribute {
-                    public function __construct(
-                        protected string $statusField,
-                        protected string $activeValue,
-                        protected string $blockedValue,
-                        protected bool $invalidateSessions
-                    ) {
-                        parent::__construct('active');
-                    }
-
-                    protected function doRead(&$object, $attributes = []): bool
-                    {
-                        return $object->{$this->statusField} === $this->activeValue;
-                    }
-
-                    public function add($value, Model &$object): void
-                    {
-                        $object->{$this->statusField} = $value ? $this->activeValue : $this->blockedValue;
-                        $this->dirty = true;
-                    }
-
-                    public function replace($value, Model &$object, $path = null, $removeIfNotSet = false): void
-                    {
-                        if (config('quadsso.logging.scim_requests', false)) {
-                            Log::debug('QuadSSO SCIM active replace', [
-                                'user_id'    => $object->id,
-                                'value'      => $value,
-                                'value_type' => gettype($value),
-                                'exists'     => $object->exists,
-                                'path'       => $path,
-                            ]);
-                        }
-
-                        $object->{$this->statusField} = $value ? $this->activeValue : $this->blockedValue;
-                        $this->dirty = true;
-
-                        // If blocking an existing user and session invalidation is enabled
-                        if (!$value && $object->exists && $this->invalidateSessions) {
-                            $rows = DB::table('users')
-                                ->where('id', $object->id)
-                                ->update([$this->statusField => $this->blockedValue]);
-
-                            if (config('quadsso.logging.scim_requests', false)) {
-                                Log::debug('QuadSSO SCIM blocked user', [
-                                    'user_id' => $object->id,
-                                    'rows_updated' => $rows
-                                ]);
-                            }
-
-                            DB::table('sessions')->where('user_id', $object->id)->delete();
-                        }
-                    }
-                })->ensure('boolean')->default(true),
-
-                // name sub-attributes
-                $this->buildNameAttribute($fieldMappings),
-
-                // emails multi-value, primary email
-                $this->buildEmailsAttribute($fieldMappings),
-
-                // phoneNumbers — mobile maps to phone_cell (if configured)
-                ...($this->shouldIncludePhoneNumbers($fieldMappings)
-                    ? [$this->buildPhoneNumbersAttribute($fieldMappings)]
-                    : []),
-
-                // other — recovery_email maps to email_secondary (if configured)
-                ...($this->shouldIncludeEmailSecondary($fieldMappings)
-                    ? [$this->buildOtherAttribute($fieldMappings)]
-                    : []),
-
-                // password — never returned; on create, ignored (observer sets a random one)
-                (new class () extends Attribute {
-                    protected function doRead(&$object, $attributes = []): mixed
-                    {
-                        return null;
-                    }
-
-                    public function add($value, Model &$object): void
-                    {
-                        // Intentionally ignored — password is managed by the service provider observer
-                        $this->dirty = true;
-                    }
-
-                    public function replace($value, Model &$object, $path = null, $removeIfNotSet = false): void
-                    {
-                        // Never update password via SCIM
-                    }
-                })->setReturned('never'),
+                ...$this->buildUserSchemaAttributes($fieldMappings, $statusField, $activeValue, $blockedValue, $invalidateSessions)
             ),
         );
+    }
+
+    /**
+     * Build all user schema attributes as an array (for spreading).
+     */
+    protected function buildUserSchemaAttributes(
+        array $fieldMappings,
+        string $statusField,
+        string $activeValue,
+        string $blockedValue,
+        bool $invalidateSessions
+    ): array {
+        $attributes = [];
+
+        // userName maps to email (authentik sends email as userName)
+        $attributes[] = eloquent('userName', $fieldMappings['email'] ?? 'email')->ensure('required', 'email');
+
+        // active maps to our status field (active/blocked)
+        $attributes[] = (new class ($statusField, $activeValue, $blockedValue, $invalidateSessions) extends Attribute {
+            public function __construct(
+                protected string $statusField,
+                protected string $activeValue,
+                protected string $blockedValue,
+                protected bool $invalidateSessions
+            ) {
+                parent::__construct('active');
+            }
+
+            protected function doRead(&$object, $attributes = []): bool
+            {
+                return $object->{$this->statusField} === $this->activeValue;
+            }
+
+            public function add($value, Model &$object): void
+            {
+                $object->{$this->statusField} = $value ? $this->activeValue : $this->blockedValue;
+                $this->dirty = true;
+            }
+
+            public function replace($value, Model &$object, $path = null, $removeIfNotSet = false): void
+            {
+                if (config('quadsso.logging.scim_requests', false)) {
+                    Log::debug('QuadSSO SCIM active replace', [
+                        'user_id'    => $object->id,
+                        'value'      => $value,
+                        'value_type' => gettype($value),
+                        'exists'     => $object->exists,
+                        'path'       => $path,
+                    ]);
+                }
+
+                $object->{$this->statusField} = $value ? $this->activeValue : $this->blockedValue;
+                $this->dirty = true;
+
+                // If blocking an existing user and session invalidation is enabled
+                if (!$value && $object->exists && $this->invalidateSessions) {
+                    $rows = DB::table('users')
+                        ->where('id', $object->id)
+                        ->update([$this->statusField => $this->blockedValue]);
+
+                    if (config('quadsso.logging.scim_requests', false)) {
+                        Log::debug('QuadSSO SCIM blocked user', [
+                            'user_id' => $object->id,
+                            'rows_updated' => $rows
+                        ]);
+                    }
+
+                    DB::table('sessions')->where('user_id', $object->id)->delete();
+                }
+            }
+        })->ensure('boolean')->default(true);
+
+        // name sub-attributes
+        $attributes[] = $this->buildNameAttribute($fieldMappings);
+
+        // emails multi-value, primary email
+        $attributes[] = $this->buildEmailsAttribute($fieldMappings);
+
+        // phoneNumbers — mobile maps to phone_cell (if configured)
+        if ($this->shouldIncludePhoneNumbers($fieldMappings)) {
+            $attributes[] = $this->buildPhoneNumbersAttribute($fieldMappings);
+        }
+
+        // other — recovery_email maps to email_secondary (if configured)
+        if ($this->shouldIncludeEmailSecondary($fieldMappings)) {
+            $attributes[] = $this->buildOtherAttribute($fieldMappings);
+        }
+
+        // password — never returned; on create, ignored (observer sets a random one)
+        $attributes[] = (new class () extends Attribute {
+            protected function doRead(&$object, $attributes = []): mixed
+            {
+                return null;
+            }
+
+            public function add($value, Model &$object): void
+            {
+                // Intentionally ignored — password is managed by the service provider observer
+                $this->dirty = true;
+            }
+
+            public function replace($value, Model &$object, $path = null, $removeIfNotSet = false): void
+            {
+                // Never update password via SCIM
+            }
+        })->setReturned('never');
+
+        return $attributes;
     }
 
     /**
