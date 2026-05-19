@@ -68,6 +68,21 @@ return [
         // Invalidate user sessions when they are blocked via SCIM
         'invalidate_sessions_on_block' => env('SCIM_INVALIDATE_SESSIONS_ON_BLOCK', true),
 
+        /*
+        | Legacy bootstrap: allow SCIM POST to bind to an existing user row by email
+        | when that row has no scim_external_id yet.
+        |
+        | Default: false. SCIM POST creates a new user. If a row already exists with
+        | the same userName/email and a DIFFERENT externalId (or any externalId), SCIM
+        | responds 409 (uniqueness) per RFC 7644.
+        |
+        | When true: if no row matches by externalId, fall back to matching by email —
+        | but ONLY when that row has scim_external_id IS NULL. Lets you onboard
+        | pre-SSO users into the IdP once. Re-enables the email-based identity flow
+        | that earlier versions used unconditionally; only enable during migration.
+        */
+        'allow_legacy_email_merge' => env('SCIM_ALLOW_LEGACY_EMAIL_MERGE', false),
+
         // Default user level/role for new SCIM-provisioned users
         'default_user_level' => env('SCIM_DEFAULT_USER_LEVEL', 'user'),
 
@@ -155,6 +170,23 @@ return [
 
         // Invalidate remember tokens on SLO
         'invalidate_remember_tokens_on_slo' => env('SSO_INVALIDATE_REMEMBER_TOKENS_ON_SLO', true),
+
+        /*
+        | Legacy bootstrap: bind a user to their IdP identity by email on first login.
+        |
+        | Default: false. Identity is resolved by the OIDC `sub` claim, stored in
+        | scim_external_id. Email is NEVER used to resolve identity once a binding
+        | exists.
+        |
+        | When true: if no row matches the incoming `sub`, fall back to a row that
+        | matches by email AND has scim_external_id IS NULL — then bind the sub onto
+        | that row. The IdP must assert `email_verified=true` for this fallback to fire.
+        |
+        | This enables one-time migration of pre-SSO users, but exposes the host
+        | application to email-based account-takeover IF self-service email change is
+        | not also disabled. Only enable during migration, then turn it back off.
+        */
+        'allow_legacy_email_binding' => env('SSO_ALLOW_LEGACY_EMAIL_BINDING', false),
     ],
 
     /*
