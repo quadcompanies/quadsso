@@ -35,21 +35,71 @@ class QuadSSOScimConfig extends SCIMConfig
             'withRelations' => [],
             'description' => 'User Account',
 
-            // On POST (create), find an existing user by email instead of inserting a duplicate.
-            // This handles manually-provisioned users that don't yet have a scim_external_id.
+            // SCIM POST identity resolution:
+            //
+            //   1. If externalId is provided in the request and matches a row → that row.
+            //      (Idempotent re-POSTs from Authentik land here.)
+            //   2. Otherwise, if a row exists with the same userName/email AND a
+            //      DIFFERENT externalId (or any externalId), refuse with 409 uniqueness.
+            //      This is the case the legacy `firstOrNew([email])` silently merged,
+            //      which let a user who could change their own email pre-claim an
+            //      identity that SCIM would later attach the victim's externalId to.
+            //   3. If the row exists with the same email AND no externalId yet, only
+            //      merge into it when `scim.allow_legacy_email_merge` is enabled
+            //      (one-time onboarding of pre-SSO users). Off by default.
+            //   4. Otherwise, create a new user.
             'factory' => function () use ($userModel, $fieldMappings, $allowCreation) {
                 if (!$allowCreation) {
                     throw new \Exception('User creation via SCIM is disabled.');
                 }
 
                 $emailField = $fieldMappings['email'] ?? 'email';
+                $externalIdField = $fieldMappings['external_id'] ?? 'scim_external_id';
+
                 $email = request()->input('userName')
                     ?? collect(request()->input('emails', []))->firstWhere('primary', true)['value']
                     ?? null;
 
-                return $email
-                    ? $userModel::firstOrNew([$emailField => $email])
-                    : new $userModel();
+                $externalId = request()->input('externalId');
+
+                // (1) Stable identifier — idempotent re-create from the IdP.
+                if ($externalId) {
+                    $byExternalId = $userModel::where($externalIdField, $externalId)->first();
+                    if ($byExternalId) {
+                        return $byExternalId;
+                    }
+                }
+
+                if ($email) {
+                    $byEmail = $userModel::where($emailField, $email)->first();
+
+                    if ($byEmail) {
+                        $existingExternalId = $byEmail->{$externalIdField} ?? null;
+
+                        // (2) Email already belongs to a different IdP identity.
+                        if ($existingExternalId && $existingExternalId !== $externalId) {
+                            self::abortWithScimUniqueness(
+                                "User '{$email}' is already bound to a different external identity."
+                            );
+                        }
+
+                        // (3) No externalId yet → legacy bootstrap, opt-in only.
+                        if (!$existingExternalId) {
+                            if (!config('quadsso.scim.allow_legacy_email_merge', false)) {
+                                self::abortWithScimUniqueness(
+                                    "User '{$email}' already exists locally. Enable scim.allow_legacy_email_merge to onboard pre-SSO users."
+                                );
+                            }
+                            return $byEmail;
+                        }
+
+                        // Same externalId → idempotent (rare; covered by (1) above).
+                        return $byEmail;
+                    }
+                }
+
+                // (4) Genuinely new user.
+                return new $userModel();
             },
 
             'map' => $this->buildUserAttributeMap($fieldMappings),
@@ -548,5 +598,22 @@ class QuadSSOScimConfig extends SCIMConfig
         return [
             'Users' => $this->getUserConfig(),
         ];
+    }
+
+    /**
+     * Abort the current request with an RFC 7644 §3.12 "uniqueness" error.
+     *
+     * Used by the User `factory` to refuse SCIM POSTs that would collide with
+     * a different externalId on the same email — the silent-merge behavior
+     * that earlier versions had.
+     */
+    protected static function abortWithScimUniqueness(string $detail): void
+    {
+        abort(response()->json([
+            'schemas'  => ['urn:ietf:params:scim:api:messages:2.0:Error'],
+            'status'   => '409',
+            'scimType' => 'uniqueness',
+            'detail'   => $detail,
+        ], 409, ['Content-Type' => 'application/scim+json']));
     }
 }

@@ -31,8 +31,15 @@ class SsoController extends Controller
 
     /**
      * Handle the callback from authentik.
-     * Finds the pre-provisioned user (via SCIM) and logs them in.
-     * Never creates users here — that is SCIM's job.
+     *
+     * Identity is resolved by the OIDC `sub` claim (stored in scim_external_id).
+     * Email is NOT a primary identifier — using it as one would let a user with
+     * self-service email-change access pre-claim someone else's identity and be
+     * matched to that row on the victim's next SSO login.
+     *
+     * The only fallback to email matching is the legacy bootstrap path
+     * (`sso.allow_legacy_email_binding`), which requires email_verified=true
+     * from the IdP AND that the local row has no scim_external_id yet.
      */
     public function callback(): RedirectResponse
     {
@@ -43,51 +50,95 @@ class SsoController extends Controller
                 'error' => $e->getMessage(),
             ]);
 
-            return redirect()
-                ->route(config('quadsso.sso.redirect_after_failure', '/login'))
-                ->withErrors(['email' => 'Authentication failed. Please try again.']);
+            return $this->redirectAfterFailure(
+                'Authentication failed. Please try again.'
+            );
+        }
+
+        $externalId = $socialUser->getId();
+        $email = $socialUser->getEmail();
+        $idpEmailVerified = (bool) data_get($socialUser->user, 'email_verified', false);
+
+        if (!$externalId) {
+            Log::warning('QuadSSO: IdP did not return a sub claim — refusing login', [
+                'email' => $email,
+            ]);
+            return $this->redirectAfterFailure(
+                'Authentication failed. Please contact an administrator.'
+            );
         }
 
         $userModel = config('quadsso.user_model', \App\Models\User::class);
         $emailField = config('quadsso.field_mappings.email', 'email');
+        $externalIdField = config('quadsso.field_mappings.external_id', 'scim_external_id');
         $statusField = config('quadsso.scim.user_status_field', 'status');
         $blockedValue = config('quadsso.scim.blocked_status_value', 'blocked');
 
-        // Find user by email (primary key) — SCIM should have provisioned them
-        $user = $userModel::where($emailField, $socialUser->getEmail())->first();
+        // 1. Authoritative lookup: stable IdP subject identifier.
+        $user = $userModel::where($externalIdField, $externalId)->first();
+
+        // 2. Legacy bootstrap (opt-in, single-use): bind the sub onto a row that
+        //    matches by email and has no external_id yet. Requires email_verified.
+        if (!$user && config('quadsso.sso.allow_legacy_email_binding', false) && $email) {
+            if (!$idpEmailVerified) {
+                Log::warning('QuadSSO: refusing legacy email binding (email_verified=false)', [
+                    'email'       => $email,
+                    'external_id' => $externalId,
+                ]);
+                return $this->redirectAfterFailure(
+                    'Your email address has not been verified by the identity provider.'
+                );
+            }
+
+            $user = $userModel::where($emailField, $email)
+                ->whereNull($externalIdField)
+                ->first();
+
+            if ($user) {
+                $user->{$externalIdField} = $externalId;
+                $user->save();
+
+                if (config('quadsso.logging.sso_events', false)) {
+                    Log::info('QuadSSO: bound external_id onto legacy user', [
+                        'user_id'     => $user->id,
+                        'email'       => $email,
+                        'external_id' => $externalId,
+                    ]);
+                }
+            }
+        }
 
         if (!$user) {
             if (config('quadsso.logging.sso_events', false)) {
                 Log::warning('QuadSSO: No user found for SSO callback', [
-                    'email' => $socialUser->getEmail(),
+                    'email'       => $email,
+                    'external_id' => $externalId,
                 ]);
             }
 
-            return redirect()
-                ->route(config('quadsso.sso.redirect_after_failure', '/login'))
-                ->withErrors([
-                    'email' => 'No account found for this identity. Please contact an administrator.',
-                ]);
+            return $this->redirectAfterFailure(
+                'No account found for this identity. Please contact an administrator.'
+            );
         }
 
-        // Check if user is blocked
+        // Block check
         if ($user->$statusField === $blockedValue || (method_exists($user, 'isBlocked') && $user->isBlocked())) {
             if (config('quadsso.logging.sso_events', false)) {
                 Log::warning('QuadSSO: Blocked user attempted SSO login', [
-                    'user_id' => $user->id,
-                    'email' => $socialUser->getEmail(),
+                    'user_id'     => $user->id,
+                    'external_id' => $externalId,
                 ]);
             }
 
-            return redirect()
-                ->route(config('quadsso.sso.redirect_after_failure', '/login'))
-                ->withErrors([
-                    'email' => 'Your account has been suspended. Please contact an administrator.',
-                ]);
+            return $this->redirectAfterFailure(
+                'Your account has been suspended. Please contact an administrator.'
+            );
         }
 
-        // Mark email as verified on first SSO login (authentik handles identity verification)
-        if (config('quadsso.sso.auto_verify_email', true)) {
+        // Mark email as verified on first SSO login. Only do this when the IdP
+        // actually claims the email is verified — otherwise we'd be laundering
+        // an unverified email through SSO.
+        if (config('quadsso.sso.auto_verify_email', true) && $idpEmailVerified) {
             $verifiedAtField = config('quadsso.field_mappings.email_verified_at', 'email_verified_at');
             if (!$user->$verifiedAtField) {
                 $user->$verifiedAtField = now();
@@ -99,8 +150,8 @@ class SsoController extends Controller
 
         if (config('quadsso.logging.sso_events', false)) {
             Log::info('QuadSSO: User logged in via SSO', [
-                'user_id' => $user->id,
-                'email' => $socialUser->getEmail(),
+                'user_id'     => $user->id,
+                'external_id' => $externalId,
             ]);
         }
 
@@ -109,11 +160,26 @@ class SsoController extends Controller
     }
 
     /**
+     * Send the user back to the configured failure URL.
+     *
+     * `redirect_after_failure` is a URL path (e.g. '/login'), not a route name.
+     * Using redirect()->route() against a path throws RouteNotFoundException,
+     * which Laravel renders as HTTP 500 — masking the actual auth failure with
+     * a server-error page. redirect() takes a path directly.
+     */
+    private function redirectAfterFailure(string $message): RedirectResponse
+    {
+        return redirect(config('quadsso.sso.redirect_after_failure', '/login'))
+            ->withErrors(['email' => $message]);
+    }
+
+    /**
      * Handle OIDC Back-Channel Single Logout (SLO) from authentik.
      *
      * authentik POSTs application/x-www-form-urlencoded with a signed
-     * logout_token JWT. We verify the token, find the user by the `sub`
-     * claim (= scim_external_id), and wipe their sessions.
+     * logout_token JWT. We verify signature, issuer, audience, replay, and
+     * the back-channel-logout event claim, then wipe sessions for the user
+     * identified by `sub` (= scim_external_id).
      */
     public function slo(Request $request): Response
     {
@@ -144,10 +210,42 @@ class SsoController extends Controller
             return response('Invalid token', 400);
         }
 
-        // Ensure this is actually a back-channel logout event
+        // Issuer must match the configured Authentik base URL. Authentik issues
+        // `https://<base>/application/o/<slug>/`, so a prefix match is correct.
+        $expectedIssuerPrefix = rtrim((string) config('quadsso.authentik.base_url'), '/');
+        $iss = (string) ($payload->iss ?? '');
+        if ($expectedIssuerPrefix === '' || !str_starts_with($iss, $expectedIssuerPrefix)) {
+            Log::warning('QuadSSO SLO: bad issuer', ['iss' => $iss]);
+            return response('Invalid token', 400);
+        }
+
+        // Audience must include our client_id. Tokens minted for other OIDC
+        // clients in the same Authentik instance will fail this check.
+        $expectedAudience = (string) config('quadsso.authentik.client_id');
+        $aud = $payload->aud ?? null;
+        $audList = is_array($aud) ? $aud : [$aud];
+        if ($expectedAudience === '' || !in_array($expectedAudience, $audList, true)) {
+            Log::warning('QuadSSO SLO: bad audience', ['aud' => $aud]);
+            return response('Invalid token', 400);
+        }
+
+        // The back-channel-logout event claim must be present per OIDC spec.
         $events = (array) ($payload->events ?? []);
         if (!array_key_exists('http://schemas.openid.net/event/backchannel-logout', $events)) {
             Log::warning('QuadSSO SLO: logout_token missing backchannel-logout event claim');
+            return response('Invalid token', 400);
+        }
+
+        // Replay protection: cache the jti for the token's natural lifetime so
+        // an intercepted/leaked logout_token can't be replayed indefinitely.
+        $jti = $payload->jti ?? null;
+        if (!$jti) {
+            Log::warning('QuadSSO SLO: logout_token missing jti claim');
+            return response('Invalid token', 400);
+        }
+        $jtiCacheKey = 'quadsso_slo_jti:' . hash('sha256', (string) $jti);
+        if (!Cache::add($jtiCacheKey, 1, now()->addMinutes(15))) {
+            Log::warning('QuadSSO SLO: replayed jti', ['jti' => $jti]);
             return response('Invalid token', 400);
         }
 
