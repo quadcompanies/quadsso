@@ -5,6 +5,28 @@ All notable changes to QuadSSO will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-05-18
+
+### 🔒 CRITICAL FIX: SSO Routes Now Have Session Support
+
+**Issue:** SSO authentication failed with "Session store not set on request" error
+
+**Root Cause:** SSO routes were loaded without the 'web' middleware group, missing:
+- Session middleware (required for OAuth state management)
+- CSRF protection
+- Cookie encryption
+- Session tracking
+
+**Fix:** Wrapped route loading in `Route::middleware('web')->group()` in `QuadSSOServiceProvider`
+
+**Impact:** SSO login/callback/logout now work correctly with proper session handling
+
+### Fixed
+
+- SSO routes now include 'web' middleware group for session support
+- OAuth state verification works properly (no more session errors)
+- CSRF tokens properly handled on SSO routes
+
 ## [1.2.0] - 2026-05-18
 
 ### 🎉 MAJOR FIX: Works with Laravel's Default Schema

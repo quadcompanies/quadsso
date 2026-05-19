@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
@@ -26,8 +27,11 @@ class QuadSSOServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
-        // Load routes
-        $this->loadRoutesFrom(__DIR__ . '/../routes/quadsso.php');
+        // Load routes with 'web' middleware group for session support
+        // SSO authentication requires sessions for OAuth state management
+        Route::middleware('web')->group(function () {
+            $this->loadRoutesFrom(__DIR__ . '/../routes/quadsso.php');
+        });
 
         // Register migrations
         $this->loadMigrationsFrom(__DIR__ . '/../database/migrations');
