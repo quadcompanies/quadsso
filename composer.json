@@ -12,9 +12,7 @@
     ],
     "require": {
         "php": "^8.2",
-        "illuminate/support": "^11.0|^12.0",
-        "illuminate/database": "^11.0|^12.0",
-        "illuminate/http": "^11.0|^12.0",
+        "illuminate/contracts": "^11.0|^12.0",
         "arietimmerman/laravel-scim-server": "^1.4",
         "laravel/socialite": "^5.25",
         "socialiteproviders/authentik": "^5.3",
