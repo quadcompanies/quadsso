@@ -30,7 +30,7 @@ AUTHENTIK_JWKS_URI=https://authentik.your-domain.com/application/o/your-app/jwks
 AUTHENTIK_LOGOUT_URL=https://authentik.your-domain.com/application/o/your-app/end-session/
 
 # Generate a secure random token for SCIM
-SCIM_BEARER_TOKEN=random-secure-token-here
+SCIM_BEARER_TOKEN=random-secure-token-here.
 ```
 
 Add to `config/services.php`:
