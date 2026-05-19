@@ -174,19 +174,23 @@ return [
         /*
         | Legacy bootstrap: bind a user to their IdP identity by email on first login.
         |
-        | Default: false. Identity is resolved by the OIDC `sub` claim, stored in
-        | scim_external_id. Email is NEVER used to resolve identity once a binding
-        | exists.
+        | Default: true. Allows users to sign in even if scim_external_id is not yet
+        | populated (first-time SSO, manual user creation, or SCIM not yet synced).
         |
         | When true: if no row matches the incoming `sub`, fall back to a row that
         | matches by email AND has scim_external_id IS NULL — then bind the sub onto
         | that row. The IdP must assert `email_verified=true` for this fallback to fire.
         |
-        | This enables one-time migration of pre-SSO users, but exposes the host
-        | application to email-based account-takeover IF self-service email change is
-        | not also disabled. Only enable during migration, then turn it back off.
+        | SECURITY: This is safe for most deployments because:
+        | - Requires email_verified=true from the IdP (not self-asserted)
+        | - Only binds once (when scim_external_id is NULL)
+        | - After binding, identity is ALWAYS resolved by sub (not email)
+        |
+        | IMPORTANT: If your application allows self-service email change WITHOUT
+        | re-verification, set this to false and ensure all users are provisioned
+        | via SCIM before their first login.
         */
-        'allow_legacy_email_binding' => env('SSO_ALLOW_LEGACY_EMAIL_BINDING', false),
+        'allow_legacy_email_binding' => env('SSO_ALLOW_LEGACY_EMAIL_BINDING', true),
     ],
 
     /*

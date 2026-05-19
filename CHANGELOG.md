@@ -5,6 +5,28 @@ All notable changes to QuadSSO will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-05-18
+
+### Fixed
+
+- **CRITICAL: SSO login broken for users without scim_external_id**
+  - Changed `sso.allow_legacy_email_binding` default from `false` to `true`
+  - v1.3.0 broke sign-in for: fresh installs, manual users, users not yet synced via SCIM
+  - Legacy email binding is SAFE by default (requires email_verified=true from IdP + one-time bind)
+  - After binding, identity is always resolved by sub (not email)
+  - Only unsafe if app allows self-service email change without re-verification
+
+### Security Note
+
+Legacy email binding remains secure because:
+- Requires IdP to assert `email_verified=true` (not self-claimed)
+- Only binds when `scim_external_id` IS NULL (one-time operation)
+- After binding, all future logins use `sub` claim (not email)
+
+Disable it (`SSO_ALLOW_LEGACY_EMAIL_BINDING=false`) only if your app allows
+unverified email changes and you can guarantee all users are SCIM-provisioned
+before first login.
+
 ## [1.3.0] - 2026-05-18
 
 ### 🔒 Security — Critical / High
