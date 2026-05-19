@@ -40,6 +40,10 @@ class QuadSSOServiceProvider extends ServiceProvider
             __DIR__ . '/../database/migrations' => database_path('migrations'),
         ], 'quadsso-migrations');
 
+        // CRITICAL SECURITY: Auto-configure SCIM middleware if not already set
+        // This prevents SCIM endpoints from being publicly accessible
+        $this->configureScimSecurity();
+
         // Register the authentik Socialite provider
         Event::listen(SocialiteWasCalled::class, function (SocialiteWasCalled $event) {
             $event->extendSocialite('authentik', \SocialiteProviders\Authentik\Provider::class);
@@ -47,6 +51,26 @@ class QuadSSOServiceProvider extends ServiceProvider
 
         // Set up User model observer for SCIM provisioning
         $this->registerUserObserver();
+    }
+
+    /**
+     * Configure SCIM security middleware automatically
+     * This prevents SCIM endpoints from being publicly accessible by default
+     */
+    protected function configureScimSecurity(): void
+    {
+        // Only auto-configure if SCIM config hasn't been published yet
+        // or if the middleware is still set to default (empty array or not set)
+        $currentMiddleware = config('scim.middleware', []);
+
+        // If middleware is empty or default, set our security middleware
+        if (empty($currentMiddleware)) {
+            config([
+                'scim.middleware' => [
+                    \QuadCompanies\QuadSSO\Middleware\ScimBearerToken::class
+                ]
+            ]);
+        }
     }
 
     /**

@@ -44,6 +44,7 @@ php artisan migrate
 This adds:
 - `scim_external_id` - Stores the Authentik user UUID
 - `email_verified_at` - Standard Laravel email verification field (if not already present)
+- `status` - User status field (default: 'active') for SCIM user blocking
 
 ### 4. Update Your User Model
 
@@ -393,10 +394,31 @@ Make sure:
 
 ## Security
 
-- Always use HTTPS in production
-- Keep your `SCIM_BEARER_TOKEN` secure and random (use `php artisan key:generate` style tokens)
-- Regularly rotate your Authentik client secrets
-- Monitor your logs for unauthorized SCIM access attempts
+### 🔒 SCIM Endpoint Protection
+
+**The package automatically secures SCIM endpoints** with bearer token authentication. The `ScimBearerToken` middleware is auto-configured to protect all `/scim/v2/*` routes.
+
+**To verify security is working:**
+
+```bash
+# Should return 401 Unauthorized
+curl http://your-app.local/scim/v2/Users
+
+# Should return user data (with valid token)
+curl -H "Authorization: Bearer your-token-here" http://your-app.local/scim/v2/Users
+```
+
+### Best Practices
+
+- ✅ Always use HTTPS in production
+- ✅ Generate a strong random token for `SCIM_BEARER_TOKEN`:
+  ```bash
+  php artisan tinker --execute="echo \Illuminate\Support\Str::random(64);"
+  ```
+- ✅ Keep your `SCIM_BEARER_TOKEN` secure - treat it like a password
+- ✅ Regularly rotate your Authentik client secrets and SCIM tokens
+- ✅ Monitor your logs for unauthorized SCIM access attempts (enable `QUADSSO_LOG_SCIM_REQUESTS=true`)
+- ✅ Use firewall rules to restrict SCIM endpoint access to Authentik's IP addresses if possible
 
 ## License
 

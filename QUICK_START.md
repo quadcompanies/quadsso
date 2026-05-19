@@ -16,6 +16,8 @@ php artisan vendor:publish --tag=quadsso-config
 php artisan migrate
 ```
 
+> **🔒 SECURITY NOTE:** The package automatically secures SCIM endpoints with bearer token authentication. Make sure to set a strong `SCIM_BEARER_TOKEN` in the next step.
+
 ## Step 2: Configure Environment (3 minutes)
 
 Add to your `.env`:
@@ -29,8 +31,9 @@ AUTHENTIK_BASE_URL=https://authentik.your-domain.com
 AUTHENTIK_JWKS_URI=https://authentik.your-domain.com/application/o/your-app/jwks/
 AUTHENTIK_LOGOUT_URL=https://authentik.your-domain.com/application/o/your-app/end-session/
 
-# Generate a secure random token for SCIM
-SCIM_BEARER_TOKEN=random-secure-token-here.
+# Generate a secure random token for SCIM (REQUIRED FOR SECURITY)
+# Use: php artisan tinker --execute="echo \Illuminate\Support\Str::random(64);"
+SCIM_BEARER_TOKEN=your-secure-64-character-random-token
 ```
 
 Add to `config/services.php`:
@@ -54,27 +57,14 @@ Add to your User model's `$fillable` array:
 protected $fillable = [
     'email',
     'password',
-    'scim_external_id',  // Add this
-    'email_verified_at', // Add if not present
-    'status',            // Add if not present
+    'scim_external_id',  // Added by migration
+    'email_verified_at', // Added by migration
+    'status',            // Added by migration
     // ... your other fields
 ];
 ```
 
-If you don't have a `status` field, add it to your users table:
-
-```bash
-php artisan make:migration add_status_to_users_table
-```
-
-```php
-public function up()
-{
-    Schema::table('users', function (Blueprint $table) {
-        $table->string('status')->default('active')->after('email');
-    });
-}
-```
+> **✅ NOTE:** The migration automatically creates `scim_external_id`, `email_verified_at`, and `status` columns if they don't exist.
 
 ## Step 4: Set Up Authentik (4 minutes)
 
@@ -122,6 +112,18 @@ public function up()
 3. Add users or groups who should have access
 
 ## Step 5: Test! (optional)
+
+### Verify SCIM Security (IMPORTANT)
+
+Test that SCIM endpoints are protected:
+
+```bash
+# Should return 401 Unauthorized
+curl http://your-app.local/scim/v2/Users
+
+# Should return user data (with valid token)
+curl -H "Authorization: Bearer your-token-here" http://your-app.local/scim/v2/Users
+```
 
 ### Test SSO Login
 
