@@ -5,6 +5,76 @@ All notable changes to QuadSSO will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-05-18
+
+### 🔒 Security — Critical / High
+
+This release fixes a chain of issues identified in an SSO/SCIM security audit.
+Please read the upgrade notes — two changes are technically breaking but
+default-safe.
+
+#### Fixed
+
+- **CRITICAL: account takeover via email-based identity matching.**
+  - `SsoController::callback` now resolves the local user by the OIDC `sub`
+    claim (`scim_external_id`), not by email. Email is no longer authoritative.
+  - `QuadSSOScimConfig`'s SCIM POST factory now refuses to silently merge a new
+    SCIM user into an existing local row that already belongs to a different
+    externalId — it returns RFC 7644 §3.12 `409 uniqueness` instead.
+  - In combination, this closes the path where a user with self-service email
+    change in the host app could pre-claim a victim's email, then be matched to
+    the victim's identity on the victim's next SSO login.
+- **HIGH: SLO endpoint was unreachable due to CSRF.** `auth/sso/logout` is now
+  registered outside the `web` middleware group so Authentik's back-channel
+  POSTs no longer get rejected with HTTP 419. Authentication on this endpoint
+  is performed entirely by JWT validation.
+- **HIGH: SSO failure paths returned HTTP 500.** `sso.redirect_after_failure`
+  is a URL path, not a route name — `redirect()->route()` against it threw
+  `RouteNotFoundException`. Switched to `redirect()` (path-aware).
+
+#### Added
+
+- **`logout_token` JWT validation now checks `iss`, `aud`, and `jti`.** Without
+  these, any token signed with a key in the configured JWKS could be replayed
+  to force a per-user logout. `jti` is cached for 15 minutes to prevent replay.
+- **IdP `email_verified` claim is now respected.** The auto-verify-on-first-SSO
+  flow only sets `email_verified_at` when the IdP asserts the email is verified.
+- New config `sso.allow_legacy_email_binding` (default `false`). When enabled,
+  on first SSO login a user with no `scim_external_id` and a matching email
+  may be bound to the incoming `sub`. Requires `email_verified=true`.
+  Intended for one-time migration of pre-SSO users.
+- New config `scim.allow_legacy_email_merge` (default `false`). When enabled,
+  SCIM POST may merge into an existing local row that matches by email AND
+  has no `scim_external_id`. Same migration intent as above.
+- SCIM request-body logging now redacts PII keys (`userName`, `emails`,
+  `phoneNumbers`, `name.*`, `externalId`, `password`, ...) before writing
+  to the log. Non-JSON bodies are logged as `[non-json body]`.
+
+### Breaking Changes
+
+- **`SsoController::callback` no longer matches by email.** Existing deployments
+  must have `scim_external_id` populated for all users before deploying, OR set
+  `SSO_ALLOW_LEGACY_EMAIL_BINDING=true` for the migration window and ensure the
+  host app does **not** allow self-service email change while it's on.
+- **SCIM POST with a colliding email returns 409 instead of merging.** If you
+  rely on email-based merge for legacy bootstrapping, set
+  `SCIM_ALLOW_LEGACY_EMAIL_MERGE=true` temporarily.
+
+### Migration Guide
+
+For an existing install:
+
+1. Verify every active user has a `scim_external_id`.
+   `select count(*) from users where scim_external_id is null and status='active'`
+2. If you have legacy users without one:
+   - Disable self-service email change in your host app, **then**
+   - Set `SSO_ALLOW_LEGACY_EMAIL_BINDING=true` and
+     `SCIM_ALLOW_LEGACY_EMAIL_MERGE=true`.
+   - Let users log in once to bind, or have Authentik run a SCIM sync.
+   - Turn both flags back off.
+3. Confirm `auth/sso/logout` returns 200 (not 419) when Authentik posts a valid
+   `logout_token`.
+
 ## [1.2.2] - 2026-05-18
 
 ### Fixed
