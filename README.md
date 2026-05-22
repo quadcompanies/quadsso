@@ -5,6 +5,7 @@ A Laravel package for SSO integration with Authentik using SCIM provisioning.
 ## Features
 
 - **SCIM User Provisioning**: Automatically sync users from Authentik to your Laravel application
+- **JIT (Just-In-Time) Provisioning**: Optionally create users on their first SSO login without SCIM (opt-in)
 - **SSO Authentication**: OAuth/OIDC-based single sign-on with Authentik
 - **Single Logout (SLO)**: Back-channel logout support to invalidate sessions when users log out from Authentik
 - **Configurable**: Control user creation, updates, deletion, and field mappings via configuration
@@ -118,6 +119,7 @@ SSO_REDIRECT_AFTER_LOGIN=/home
 SSO_REDIRECT_AFTER_FAILURE=/login
 SSO_ENABLE_SLO=true
 SSO_INVALIDATE_REMEMBER_TOKENS_ON_SLO=true
+SSO_ENABLE_JIT_PROVISIONING=false
 
 # Logging (optional, for debugging)
 QUADSSO_LOG_SCIM_REQUESTS=false
@@ -204,6 +206,35 @@ Control what SCIM operations are allowed:
     'allow_user_deletion' => true,  // Allow blocking users via SCIM (active=false)
 ],
 ```
+
+### JIT (Just-In-Time) Provisioning
+
+Enable automatic user creation on first SSO login without requiring SCIM:
+
+```php
+'sso' => [
+    'enable_jit_provisioning' => true,  // Automatically create users on first SSO login
+],
+```
+
+Or via environment variable:
+
+```env
+SSO_ENABLE_JIT_PROVISIONING=true
+```
+
+**When JIT provisioning is enabled:**
+- Users are automatically created during their first SSO login
+- Requires the IdP to assert `email_verified=true` for security
+- User data (email, name, external_id) is populated from the OAuth response
+- If a user with the same email exists but has no `scim_external_id`, they will be bound to that account
+
+**Use cases:**
+- Internal company applications where all IdP users should have access
+- Environments where you trust your IdP's authentication and want seamless onboarding
+- Migration scenarios where you're transitioning from manual user management to IdP-based auth
+
+**Note:** You can use JIT provisioning alongside SCIM. SCIM will handle bulk provisioning and updates, while JIT acts as a fallback for new users who haven't been synced yet.
 
 ## Authentik Setup
 
@@ -295,6 +326,26 @@ SCIM routes are automatically registered by the `laravel-scim-server` package:
 2. **Laravel verifies JWT** → Finds user by `scim_external_id`
 3. **Sessions deleted** → User is logged out from all devices
 4. **Remember tokens cycled** → "Remember me" cookies are invalidated
+
+### JIT (Just-In-Time) Provisioning Flow (Optional)
+
+If you enable JIT provisioning with `SSO_ENABLE_JIT_PROVISIONING=true`, users will be automatically created on their first SSO login without needing SCIM:
+
+1. **User logs in via SSO** → Doesn't exist in Laravel yet
+2. **IdP verifies user** → Returns verified email and profile data
+3. **Laravel creates user** → Automatically provisions user with data from IdP
+4. **Session created** → User is logged in immediately
+
+**Security considerations:**
+- Requires `email_verified=true` from the IdP (prevents unverified email attacks)
+- Checks for email collisions before creating users
+- Can bind to existing users that have no `scim_external_id` yet
+- Best suited for environments where you trust all IdP-authenticated users
+
+**When to use JIT vs SCIM:**
+- **Use JIT** when you want open access for any authenticated IdP user (e.g., internal company apps)
+- **Use SCIM** when you need explicit control over who can access your app (e.g., customer-facing SaaS)
+- You can use both together: SCIM for bulk provisioning, JIT as a fallback for new users
 
 ## Customization
 

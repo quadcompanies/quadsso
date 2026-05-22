@@ -184,6 +184,23 @@ In `.env`:
 SSO_REDIRECT_AFTER_LOGIN=/dashboard
 ```
 
+### Enable JIT (Just-In-Time) Provisioning
+
+Skip SCIM setup and create users automatically on first SSO login:
+
+In `.env`:
+
+```env
+SSO_ENABLE_JIT_PROVISIONING=true
+```
+
+**Benefits:**
+- No need to configure SCIM provider in Authentik
+- Users are created automatically on first login
+- Simpler setup for internal apps where all IdP users should have access
+
+**Note:** With JIT enabled, you can skip Steps 4.3-4.5 (SCIM provider setup). Users will be created when they first log in via SSO.
+
 ## Troubleshooting
 
 ### "SCIM bearer token not configured"
@@ -193,6 +210,7 @@ SSO_REDIRECT_AFTER_LOGIN=/dashboard
 - User hasn't been synced via SCIM yet
 - Check that SCIM provider is bound to the application
 - Check that user is assigned to the application in Authentik
+- **Alternative:** Enable JIT provisioning with `SSO_ENABLE_JIT_PROVISIONING=true` to create users automatically
 
 ### "Your account has been suspended"
 - User's status field is set to blocked value

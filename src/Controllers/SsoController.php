@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Laravel\Socialite\Facades\Socialite;
 
 class SsoController extends Controller
@@ -37,9 +38,10 @@ class SsoController extends Controller
      * self-service email-change access pre-claim someone else's identity and be
      * matched to that row on the victim's next SSO login.
      *
-     * The only fallback to email matching is the legacy bootstrap path
-     * (`sso.allow_legacy_email_binding`), which requires email_verified=true
-     * from the IdP AND that the local row has no scim_external_id yet.
+     * User resolution flow:
+     * 1. Lookup by external_id (authoritative)
+     * 2. Legacy email binding (opt-in, requires email_verified=true)
+     * 3. JIT provisioning (opt-in, creates user if not found)
      */
     public function callback(): RedirectResponse
     {
@@ -104,6 +106,111 @@ class SsoController extends Controller
                         'email'       => $email,
                         'external_id' => $externalId,
                     ]);
+                }
+            }
+        }
+
+        // 3. Just-In-Time (JIT) provisioning: create user on first login if enabled
+        if (!$user && config('quadsso.sso.enable_jit_provisioning', false)) {
+            if (!$email) {
+                Log::warning('QuadSSO JIT: cannot provision user without email', [
+                    'external_id' => $externalId,
+                ]);
+                return $this->redirectAfterFailure(
+                    'Authentication failed. Please contact an administrator.'
+                );
+            }
+
+            // Require email_verified from IdP for JIT provisioning (same security posture as legacy binding)
+            if (!$idpEmailVerified) {
+                Log::warning('QuadSSO JIT: refusing provisioning (email_verified=false)', [
+                    'email'       => $email,
+                    'external_id' => $externalId,
+                ]);
+                return $this->redirectAfterFailure(
+                    'Your email address has not been verified by the identity provider.'
+                );
+            }
+
+            // Check if a user with this email already exists (with a different external_id)
+            $existingUser = $userModel::where($emailField, $email)->first();
+            if ($existingUser && $existingUser->{$externalIdField}) {
+                Log::warning('QuadSSO JIT: email collision with existing user', [
+                    'email'                => $email,
+                    'incoming_external_id' => $externalId,
+                    'existing_external_id' => $existingUser->{$externalIdField},
+                ]);
+                return $this->redirectAfterFailure(
+                    'An account with this email already exists. Please contact an administrator.'
+                );
+            }
+
+            // If user exists but has no external_id, bind it (same as legacy email binding)
+            if ($existingUser && !$existingUser->{$externalIdField}) {
+                $existingUser->{$externalIdField} = $externalId;
+                $existingUser->save();
+
+                $user = $existingUser;
+
+                if (config('quadsso.logging.sso_events', false)) {
+                    Log::info('QuadSSO JIT: bound external_id to existing user', [
+                        'user_id'     => $user->id,
+                        'email'       => $email,
+                        'external_id' => $externalId,
+                    ]);
+                }
+            } else {
+                // Create new user with JIT provisioning
+                $verifiedAtField = config('quadsso.field_mappings.email_verified_at', 'email_verified_at');
+                $levelField = config('quadsso.scim.user_level_field', 'level');
+
+                $userData = [
+                    $emailField       => $email,
+                    $externalIdField  => $externalId,
+                    $statusField      => config('quadsso.scim.default_user_status', 'active'),
+                    $verifiedAtField  => now(), // Email is verified by IdP
+                ];
+
+                // Add name if available from OAuth provider
+                $name = $socialUser->getName();
+                if ($name) {
+                    $nameFirstField = config('quadsso.field_mappings.name_first');
+                    $nameLastField = config('quadsso.field_mappings.name_last');
+                    $nameField = config('quadsso.field_mappings.name');
+
+                    // If using split name fields, try to parse the name
+                    if ($nameFirstField && $nameLastField) {
+                        $nameParts = explode(' ', $name, 2);
+                        $userData[$nameFirstField] = $nameParts[0] ?? '';
+                        $userData[$nameLastField] = $nameParts[1] ?? '';
+                    } elseif ($nameField) {
+                        // Use single name field
+                        $userData[$nameField] = $name;
+                    }
+                }
+
+                // Add default user level if the field exists
+                if (Schema::hasColumn((new $userModel)->getTable(), $levelField)) {
+                    $userData[$levelField] = config('quadsso.scim.default_user_level', 'user');
+                }
+
+                try {
+                    $user = $userModel::create($userData);
+
+                    Log::info('QuadSSO JIT: created new user', [
+                        'user_id'     => $user->id,
+                        'email'       => $email,
+                        'external_id' => $externalId,
+                    ]);
+                } catch (\Exception $e) {
+                    Log::error('QuadSSO JIT: failed to create user', [
+                        'email'       => $email,
+                        'external_id' => $externalId,
+                        'error'       => $e->getMessage(),
+                    ]);
+                    return $this->redirectAfterFailure(
+                        'Failed to create your account. Please contact an administrator.'
+                    );
                 }
             }
         }

@@ -172,6 +172,26 @@ return [
         'invalidate_remember_tokens_on_slo' => env('SSO_INVALIDATE_REMEMBER_TOKENS_ON_SLO', true),
 
         /*
+        | Just-In-Time (JIT) Provisioning: automatically create users on first SSO login
+        |
+        | Default: false. When enabled, users will be automatically created in the local
+        | database during their first SSO login if they don't already exist.
+        |
+        | When true: if no user is found by external_id or email, a new user will be
+        | created using data from the OAuth/OIDC provider (email, name, etc.).
+        | The IdP must assert `email_verified=true` for JIT provisioning to occur.
+        |
+        | SECURITY: This is generally safe when:
+        | - Your IdP properly verifies email addresses (not self-asserted)
+        | - You trust your IdP's user authentication
+        | - You want to allow any authenticated IdP user to access your application
+        |
+        | If you need strict control over who can access your application, disable this
+        | and use SCIM provisioning instead to explicitly control which users are created.
+        */
+        'enable_jit_provisioning' => env('SSO_ENABLE_JIT_PROVISIONING', false),
+
+        /*
         | Legacy bootstrap: bind a user to their IdP identity by email on first login.
         |
         | Default: true. Allows users to sign in even if scim_external_id is not yet
