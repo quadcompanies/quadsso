@@ -1,8 +1,15 @@
 {
     "name": "quadcompanies/quadsso",
-    "description": "A Laravel package for SSO integration with Authentik using SCIM provisioning",
+    "description": "A Laravel package for SSO integration with Authentik: OIDC login, JIT user provisioning, and back-channel Single Logout",
     "type": "library",
-    "keywords": ["laravel", "sso", "scim", "authentik", "oauth", "oidc"],
+    "keywords": [
+        "laravel",
+        "sso",
+        "authentik",
+        "oauth",
+        "oidc",
+        "slo"
+    ],
     "license": "MIT",
     "authors": [
         {
@@ -13,12 +20,12 @@
     "require": {
         "php": "^8.1|^8.2|^8.3",
         "illuminate/contracts": "^10.0|^11.0|^12.0|^13.0",
-        "arietimmerman/laravel-scim-server": "^1.4",
         "laravel/socialite": "^5.0",
         "socialiteproviders/authentik": "^5.0",
         "firebase/php-jwt": "^6.0|^7.0"
     },
     "require-dev": {
+        "mockery/mockery": "^1.6",
         "orchestra/testbench": "^8.0|^9.0|^10.0",
         "phpunit/phpunit": "^10.0|^11.0"
     },
@@ -37,8 +44,15 @@
             "providers": [
                 "QuadCompanies\\QuadSSO\\QuadSSOServiceProvider"
             ]
+        },
+        "branch-alias": {
+            "dev-2.x": "2.0.x-dev"
         }
     },
     "minimum-stability": "stable",
-    "prefer-stable": true
+    "prefer-stable": true,
+    "scripts": {
+        "test": "vendor/bin/phpunit",
+        "test:coverage": "vendor/bin/phpunit --coverage-text"
+    }
 }

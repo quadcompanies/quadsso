@@ -12,7 +12,8 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('users', function (Blueprint $table) {
-            // SCIM external ID (Authentik UUID)
+            // External IdP subject identifier (the OIDC `sub`; an Authentik UUID).
+            // Named scim_external_id for backwards compatibility.
             if (!Schema::hasColumn('users', 'scim_external_id')) {
                 $table->string('scim_external_id')->nullable()->unique()->after('email');
             }
@@ -22,7 +23,7 @@ return new class extends Migration
                 $table->timestamp('email_verified_at')->nullable()->after('email');
             }
 
-            // Add status field if it doesn't exist (required for SCIM user blocking)
+            // Account status, read by the SSO callback to deny blocked users
             if (!Schema::hasColumn('users', 'status')) {
                 $table->string('status')->default('active')->after('email');
             }

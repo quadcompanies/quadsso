@@ -2,27 +2,20 @@
 
 namespace QuadCompanies\QuadSSO;
 
-use ArieTimmerman\Laravel\SCIMServer\SCIMConfig;
+use Illuminate\Support\Facades\Blade;
 use Illuminate\Support\Facades\Event;
-use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
-use QuadCompanies\QuadSSO\Scim\QuadSSOScimConfig;
 use SocialiteProviders\Manager\SocialiteWasCalled;
 
 class QuadSSOServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
-        // Merge package config
         $this->mergeConfigFrom(__DIR__ . '/../config/quadsso.php', 'quadsso');
-
-        // Register custom SCIM config
-        $this->app->bind(SCIMConfig::class, QuadSSOScimConfig::class);
     }
 
     public function boot(): void
@@ -32,61 +25,107 @@ class QuadSSOServiceProvider extends ServiceProvider
         // back-channel logout from Authentik with HTTP 419).
         $this->loadRoutesFrom(__DIR__ . '/../routes/quadsso.php');
 
-        // Register migrations
         $this->loadMigrationsFrom(__DIR__ . '/../database/migrations');
 
-        // Publish config
+        // Anonymous components under resources/views/components resolve as
+        // <x-quadsso::login-button /> once the namespace is registered.
+        $this->loadViewsFrom(__DIR__ . '/../resources/views', 'quadsso');
+
         $this->publishes([
             __DIR__ . '/../config/quadsso.php' => config_path('quadsso.php'),
         ], 'quadsso-config');
 
-        // Publish migrations
         $this->publishes([
             __DIR__ . '/../database/migrations' => database_path('migrations'),
         ], 'quadsso-migrations');
 
-        // CRITICAL SECURITY: Auto-configure SCIM middleware if not already set
-        // This prevents SCIM endpoints from being publicly accessible
-        $this->configureScimSecurity();
+        $this->publishes([
+            __DIR__ . '/../resources/views' => resource_path('views/vendor/quadsso'),
+        ], 'quadsso-views');
+
+        $this->registerBladeDirectives();
 
         // Register the authentik Socialite provider
         Event::listen(SocialiteWasCalled::class, function (SocialiteWasCalled $event) {
             $event->extendSocialite('authentik', \SocialiteProviders\Authentik\Provider::class);
         });
 
-        // Set up User model observer for SCIM provisioning
+        $this->blockLocalAuthRoutes();
+
         $this->registerUserObserver();
 
-        // Validate schema configuration
         $this->validateSchemaConfiguration();
     }
 
     /**
-     * Configure SCIM security middleware automatically
-     * This prevents SCIM endpoints from being publicly accessible by default
+     * Convenience alias for <x-quadsso::login-button />.
+     *
+     *   @ssoLoginButton
+     *   @ssoLoginButton('Sign in with Acme ID')
+     *
+     * The directive takes a label only. Anything that needs classes, a slot or
+     * other attributes should use the component, which is what this renders.
      */
-    protected function configureScimSecurity(): void
+    protected function registerBladeDirectives(): void
     {
-        // Only auto-configure if SCIM config hasn't been published yet
-        // or if the middleware is still set to default (empty array or not set)
-        $currentMiddleware = config('scim.middleware', []);
+        Blade::directive('ssoLoginButton', function ($expression) {
+            $text = trim($expression) === '' ? 'null' : trim($expression);
 
-        // If middleware is empty or default, set our security middleware
-        if (empty($currentMiddleware)) {
-            config([
-                'scim.middleware' => [
-                    \QuadCompanies\QuadSSO\Middleware\ScimBearerToken::class
-                ]
-            ]);
-        }
+            return "<?php echo view('quadsso::components.login-button', ["
+                . "'text' => {$text},"
+                . "'attributes' => new \\Illuminate\\View\\ComponentAttributeBag(),"
+                . "'slot' => new \\Illuminate\\View\\ComponentSlot(),"
+                . "])->render(); ?>";
+        });
     }
 
     /**
-     * Register User model observer to handle SCIM-provisioned users
+     * Optionally block the host application's registration and password-reset
+     * routes, so the identity provider stays the only way in.
+     *
+     * Added to the 'web' group rather than registered globally: group middleware
+     * runs inside the route pipeline, so the route is already resolved and its
+     * name is available to match against.
+     *
+     * Registered through the HTTP kernel, not Router::pushMiddlewareToGroup().
+     * The kernel owns the canonical group definitions and syncs them onto the
+     * router when it is constructed — which can happen after this provider
+     * boots, silently discarding a router-level push. Appending via the kernel
+     * updates the definition itself, so it survives that sync. The router push
+     * remains as a fallback for containers with no HTTP kernel bound.
+     */
+    protected function blockLocalAuthRoutes(): void
+    {
+        if (!config('quadsso.disable_local_auth.enabled', false)) {
+            return;
+        }
+
+        $middleware = \QuadCompanies\QuadSSO\Middleware\BlockLocalAuthRoutes::class;
+
+        $this->app->booted(function () use ($middleware) {
+            if ($this->app->bound(\Illuminate\Contracts\Http\Kernel::class)) {
+                $kernel = $this->app->make(\Illuminate\Contracts\Http\Kernel::class);
+
+                if (method_exists($kernel, 'appendMiddlewareToGroup')) {
+                    $kernel->appendMiddlewareToGroup('web', $middleware);
+
+                    return;
+                }
+            }
+
+            $this->app['router']->pushMiddlewareToGroup('web', $middleware);
+        });
+    }
+
+    /**
+     * Fill in the columns a provisioned user needs but the IdP never supplies.
+     *
+     * Note this is a global `creating` model event: it applies to every user the
+     * host application creates, not only those provisioned through SSO.
      */
     protected function registerUserObserver(): void
     {
-        if (!config('quadsso.scim.auto_provision', true)) {
+        if (!config('quadsso.provisioning.apply_defaults', true)) {
             return;
         }
 
@@ -97,22 +136,24 @@ class QuadSSOServiceProvider extends ServiceProvider
         }
 
         $userModel::creating(function ($user) {
-            // Ensure SCIM-provisioned users (which arrive without a password) get a random one
+            // Provisioned users arrive without a password; give them an unusable one.
             if (empty($user->password)) {
                 $user->password = Hash::make(Str::random(32));
             }
 
-            // Set default user level/role if configured
-            if ($defaultLevel = config('quadsso.scim.default_user_level')) {
-                if (empty($user->{config('quadsso.scim.user_level_field', 'level')})) {
-                    $user->{config('quadsso.scim.user_level_field', 'level')} = $defaultLevel;
+            if ($defaultLevel = config('quadsso.provisioning.default_user_level')) {
+                $levelField = config('quadsso.provisioning.user_level_field', 'level');
+
+                if (empty($user->{$levelField})) {
+                    $user->{$levelField} = $defaultLevel;
                 }
             }
 
-            // Set default status if configured
-            if ($defaultStatus = config('quadsso.scim.default_user_status')) {
-                if (empty($user->{config('quadsso.scim.user_status_field', 'status')})) {
-                    $user->{config('quadsso.scim.user_status_field', 'status')} = $defaultStatus;
+            if ($defaultStatus = config('quadsso.provisioning.default_user_status')) {
+                $statusField = config('quadsso.provisioning.user_status_field', 'status');
+
+                if (empty($user->{$statusField})) {
+                    $user->{$statusField} = $defaultStatus;
                 }
             }
         });
@@ -130,7 +171,6 @@ class QuadSSOServiceProvider extends ServiceProvider
             return;
         }
 
-        // Skip if database isn't available yet
         try {
             if (!Schema::hasTable('users')) {
                 return;
@@ -139,14 +179,24 @@ class QuadSSOServiceProvider extends ServiceProvider
             return;
         }
 
-        $fieldMappings = config('quadsso.field_mappings', []);
+        // Every config key that names a column, not just field_mappings. The
+        // provisioning columns were previously unchecked, which let a typo in
+        // user_status_field disable the login block check silently.
+        $configuredColumns = [];
+
+        foreach (config('quadsso.field_mappings', []) as $ssoField => $dbColumn) {
+            $configuredColumns["field_mappings.$ssoField"] = $dbColumn;
+        }
+
+        $configuredColumns['provisioning.user_status_field'] = config('quadsso.provisioning.user_status_field');
+        $configuredColumns['provisioning.user_level_field'] = config('quadsso.provisioning.user_level_field');
+
         $missingColumns = [];
 
-        // Check each non-null mapping to ensure the column exists
-        foreach ($fieldMappings as $scimField => $dbColumn) {
-            if ($dbColumn !== null && !Schema::hasColumn('users', $dbColumn)) {
+        foreach ($configuredColumns as $configKey => $dbColumn) {
+            if ($dbColumn !== null && $dbColumn !== '' && !Schema::hasColumn('users', $dbColumn)) {
                 $missingColumns[] = [
-                    'scim_field' => $scimField,
+                    'sso_field' => $configKey,
                     'column' => $dbColumn,
                 ];
             }
@@ -154,13 +204,15 @@ class QuadSSOServiceProvider extends ServiceProvider
 
         if (!empty($missingColumns)) {
             $columnList = collect($missingColumns)
-                ->map(fn($item) => "'{$item['column']}' (mapped from SCIM '{$item['scim_field']}')")
+                ->map(fn($item) => "'{$item['column']}' (mapped from '{$item['sso_field']}')")
                 ->join(', ');
 
             Log::warning(
                 "QuadSSO: Missing database columns in 'users' table: $columnList. " .
-                "SCIM provisioning may fail. Either add these columns via migration, " .
-                "or set their mappings to null in config/quadsso.php to disable them."
+                "User provisioning may fail, and a missing status column means blocked " .
+                "accounts cannot be detected — logins are refused rather than admitted. " .
+                "Either add these columns via migration, or point the config at columns " .
+                "that exist in config/quadsso.php."
             );
         }
     }

@@ -5,6 +5,157 @@ All notable changes to QuadSSO will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-08-20
+
+### Removed — BREAKING
+
+- **SCIM provisioning removed entirely.** `QuadSSOScimConfig`, the `ScimBearerToken`
+  middleware, and the `arietimmerman/laravel-scim-server` dependency are gone —
+  roughly 43% of the codebase, along with an internet-facing authenticated write
+  endpoint into the users table. Provisioning is now JIT (or manual creation plus
+  first-login binding). See "Upgrading from 1.x" in the README; enable
+  `SSO_ENABLE_JIT_PROVISIONING=true` **before** upgrading, and unbind the SCIM
+  provider in Authentik afterwards.
+- The `scim` config section is now `provisioning`, and its surviving keys moved
+  from `SCIM_*` to `QUADSSO_*`. A missed rename is silent — the value falls back
+  to its default — so audit any customised `SCIM_USER_STATUS_FIELD` or
+  `SCIM_USER_LEVEL_FIELD`. Full mapping table in the README.
+- Dropped with SCIM: `SCIM_BEARER_TOKEN`, `SCIM_AUTO_PROVISION` (now
+  `QUADSSO_APPLY_DEFAULTS`), `SCIM_ALLOW_USER_CREATION`, `SCIM_ALLOW_USER_UPDATES`,
+  `SCIM_ALLOW_USER_DELETION`, `SCIM_INVALIDATE_SESSIONS_ON_BLOCK`,
+  `SCIM_ALLOW_LEGACY_EMAIL_MERGE`, `SCIM_ACTIVE_STATUS_VALUE`, and
+  `QUADSSO_LOG_SCIM_REQUESTS`.
+- **Blocking is no longer driven by this package.** SCIM was the only writer of
+  the blocked status value; the SSO callback still reads it, so wire your own
+  admin tooling to set it if you need a local kill switch.
+- Dead configuration keys that nothing read: `authentik.logout_url`
+  (`AUTHENTIK_LOGOUT_URL` — no front-channel logout is implemented),
+  `scim.enabled` (`SCIM_ENABLED`), `scim.path` (`SCIM_BASE_PATH`), `scim.domain`
+  (`SCIM_DOMAIN`), and `scim.pagination`. These were never bridged to
+  `laravel-scim-server`'s own `config/scim.php`, so setting them had no effect.
+- Duplicate `authentik.client_secret` and `authentik.redirect` keys. Socialite
+  reads these from `config/services.php`; the env vars are still required, but
+  they now have a single source of truth.
+
+### Changed — BREAKING
+
+- **Remember-me is now opt-in** (`SSO_REMEMBER_LOGIN`, default `false`). 1.x
+  called `Auth::login($user, remember: true)` unconditionally, issuing a cookie
+  that lasts five years by default and therefore outlives deprovisioning at the
+  IdP. With it off, post-deprovisioning exposure is bounded by `SESSION_LIFETIME`
+  instead of being effectively unbounded. Set it to `true` to restore the old
+  behaviour, but read the README's revocation section first.
+
+### Added
+
+- **Management API** (`QUADSSO_MGMT_ENABLED`, default off): `POST /api/quadsso-mgr`
+  authenticated by a shared key in a configurable header (or a bearer token),
+  accepting `SUSPEND` and `DELETE` for a user identified by email. SUSPEND clears
+  session rows, cycles the remember token, and sets the blocked status; DELETE
+  additionally removes the row, using `forceDelete()` on soft-deleting models.
+  While disabled the route is not registered at all, so the path 404s rather than
+  disclosing that the endpoint exists, and it fails closed with 503 when no key
+  is configured. Rate-limited to 60 requests/minute by default.
+- **`UserLifecycleHooks`** contract with a `NullUserLifecycleHooks` no-op base,
+  invoked around management actions. A throwing `before` hook vetoes the
+  operation (nothing written, 409); a throwing `after` hook cannot roll back a
+  committed change, so it is logged and surfaced as `post_hook_failed` rather
+  than returning an error that would invite retrying a completed action.
+
+- **Login button Blade component**, `<x-quadsso::login-button />`, rendering an
+  anchor to the SSO route with Tailwind styling. The label defaults to "Login
+  via SSO" and is settable per usage (`text` prop or slot) or globally
+  (`QUADSSO_BUTTON_LABEL`). Supplying a background class drops the default
+  palette rather than emitting both, since Tailwind resolves competing
+  utilities by stylesheet order; `:unstyled` removes all classes. Also available
+  as `@ssoLoginButton` for the label-only case, and publishable with
+  `--tag=quadsso-views`.
+
+- **Optional lockout of local auth routes** (`QUADSSO_DISABLE_LOCAL_AUTH`, default
+  off). Blocks the host application's registration and password-reset routes via
+  a middleware pushed onto the `web` group, matching resolved route names with a
+  URI-pattern fallback for unnamed routes.
+
+  This closes an SSO bypass: users provisioned through SSO hold a random,
+  unusable password, but a reachable reset flow lets them set one they know at
+  their IdP-verified address and authenticate locally from then on — surviving
+  deactivation at the IdP. `login` and `password.confirm` are deliberately not
+  blocked by default; see the README. It is defence in depth, not a guarantee,
+  since a bespoke registration controller on an unlisted path is not matched.
+
+- **Attribute sync on login** (`SSO_SYNC_ATTRIBUTES_ON_LOGIN`, default `true`).
+  Name and email are refreshed from the IdP on every login. Previously a user row
+  froze at whatever it held when created, and a rename at the IdP never reached
+  the application — SCIM used to cover this. Email is only followed when the IdP
+  asserts `email_verified=true` and no other local row holds the address; a
+  collision is logged and skipped rather than throwing.
+- **JIT (Just-In-Time) provisioning** (`SSO_ENABLE_JIT_PROVISIONING`, default off).
+  Creates users on first SSO login, gated on the IdP asserting
+  `email_verified=true` and refusing on email collision with an already-bound
+  account. Shipped previously but never recorded here.
+- Migration `2024_01_01_000003_add_quadsso_level_to_users_table` creates the user
+  level/role column that the provisioning observer has always written to. Without
+  it, user creation failed with "column not found" on a standard Laravel schema.
+  The column name follows `QUADSSO_USER_LEVEL_FIELD`; rollback is a no-op because
+  a role column is commonly shared with the host application.
+
+### Fixed
+
+- **The login block check failed open on a misconfigured status column.**
+  `$user->$statusField` is attribute access, not a query, so a
+  `provisioning.user_status_field` naming a column that does not exist read back
+  as null, never equalled the blocked value, and admitted suspended accounts
+  with no error anywhere. `validateSchemaConfiguration()` did not cover that key
+  either, so nothing warned. Now the callback refuses the login when the status
+  attribute cannot be resolved, and the boot-time check warns about every config
+  key that names a column. A model with its own `isBlocked()` method, or an empty
+  `QUADSSO_BLOCKED_STATUS_VALUE`, opts out deliberately.
+- **The local-auth lockout never ran.** It registered its middleware with
+  `Router::pushMiddlewareToGroup()` from the provider's `boot()`, but the HTTP
+  kernel owns the canonical group definitions and syncs them onto the router
+  when it is constructed — which can happen after providers boot, silently
+  discarding the push. The `web` group then resolved to the application's
+  default stack with the middleware absent, so registration and password-reset
+  routes stayed reachable with `QUADSSO_DISABLE_LOCAL_AUTH=true`. Now appended
+  through the kernel, which survives the sync. Caught by the new test suite.
+- `.env.example` shipped `SSO_ALLOW_LEGACY_EMAIL_BINDING=false`, contradicting the
+  `true` default set in 1.3.1. Copying the example file reintroduced the exact
+  "No account found for this identity" breakage that release fixed, since an
+  explicit env value overrides the config default.
+- `.env.example` was missing `SSO_ENABLE_JIT_PROVISIONING`, which shipped with JIT
+  provisioning but was never reflected in the example file.
+
+### Testing
+
+- Added a test suite (71 tests) built around security properties rather than
+  line coverage: identity resolution and approval boundaries, logout-token
+  forgery (unpublished signing key, `alg: none`, RS→HS confusion, foreign
+  issuer, wrong audience, replay), SQL-injection surfaces for both IdP-supplied
+  values and config-supplied column names, route middleware composition, and the
+  local-auth lockout.
+- The suite surfaced two defects during development, both fixed here: the
+  local-auth lockout never running, and the block check failing open on a
+  misconfigured status column.
+
+### Documentation
+
+- `QUICK_START.md` and `PACKAGE_SUMMARY.md` folded into `README.md` and removed.
+  `PACKAGE_SUMMARY.md` had drifted badly — it still described identity resolution
+  as "finds user by email", the behaviour removed in 1.3.0.
+- README now separates required from optional environment variables, documents
+  every variable the package actually reads, and describes each migration's
+  effect on the `users` table.
+- Documented the `sessions` table requirement. SLO deletes from it directly; on a
+  non-database session driver it fails, and a failed SLO returns HTTP 500 to
+  Authentik. This was never stated.
+- Documented the revocation model explicitly, including a test procedure for
+  determining whether your Authentik deployment fires back-channel logout on user
+  deactivation — the answer decides whether revocation is immediate or bounded by
+  session lifetime.
+- Corrected the claim that the extended-fields migration is opt-in via `--path`.
+  The service provider loads the whole migration directory, so `php artisan
+  migrate` has always run it.
+
 ## [1.3.1] - 2026-05-18
 
 ### Fixed

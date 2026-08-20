@@ -1,540 +1,742 @@
 # QuadSSO
 
-A Laravel package for SSO integration with Authentik using SCIM provisioning.
+A Laravel package for SSO integration with Authentik: OIDC login, Just-In-Time user provisioning, and back-channel Single Logout.
 
-## Features
+- **SSO authentication** — OAuth/OIDC login against Authentik via Socialite.
+- **JIT provisioning** — create users on their first login, from the IdP's own claims.
+- **Attribute sync** — refresh name and email from the IdP on every login.
+- **Single Logout (SLO)** — Authentik posts a signed logout token; sessions and remember-me cookies are invalidated.
+- **Management API** — an opt-in endpoint for suspending or deleting accounts out of band, with application hooks around each action.
+- **Configurable field mappings** — map IdP claims onto your own column names.
 
-- **SCIM User Provisioning**: Automatically sync users from Authentik to your Laravel application
-- **JIT (Just-In-Time) Provisioning**: Optionally create users on their first SSO login without SCIM (opt-in)
-- **SSO Authentication**: OAuth/OIDC-based single sign-on with Authentik
-- **Single Logout (SLO)**: Back-channel logout support to invalidate sessions when users log out from Authentik
-- **Configurable**: Control user creation, updates, deletion, and field mappings via configuration
-- **Session Management**: Automatically invalidate sessions when users are blocked
-- **Flexible Field Mappings**: Map Authentik/SCIM fields to your custom User model fields
+> **Upgrading from 1.x?** SCIM provisioning was removed in 2.0 and several config keys were renamed. See [Upgrading from 1.x](#upgrading-from-1x).
 
 ## Requirements
 
-- PHP 8.1 or higher
-- Laravel 10.0, 11.0, 12.0, or 13.0
-- Authentik instance with SCIM and OAuth configured
+- PHP 8.1+
+- Laravel 10, 11, 12, or 13
+- An Authentik instance with an OAuth2/OpenID provider
+- A **database-backed session table** — see [Session driver](#session-driver)
+
+---
 
 ## Installation
 
-### 1. Install via Composer
+### 1. Install
 
 ```bash
 composer require quadcompanies/quadsso
-```
-
-### 2. Publish Configuration
-
-```bash
 php artisan vendor:publish --tag=quadsso-config
-```
-
-This will create `config/quadsso.php` where you can customize all settings.
-
-### 3. Run Migrations
-
-The package includes a migration to add required fields to your `users` table:
-
-```bash
 php artisan migrate
 ```
 
-This adds:
-- `scim_external_id` - Stores the Authentik user UUID
-- `email_verified_at` - Standard Laravel email verification field (if not already present)
-- `status` - User status field (default: 'active') for SCIM user blocking
+The service provider is auto-discovered. See [Database changes](#database-changes) for exactly what `migrate` alters.
 
-**The package works out-of-the-box with Laravel's standard users table** (single `name` field). SCIM's `givenName` and `familyName` are automatically combined into the `name` column.
+### 2. Session driver
 
-### 4. Update Your User Model
-
-Ensure your User model includes the necessary fields in `$fillable`:
+SLO invalidates sessions by deleting rows from the `sessions` table:
 
 ```php
-protected $fillable = [
-    'email',
-    'password',
-    'scim_external_id',
-    'email_verified_at',
-    'status', // or whatever field you use for user status
-    'name_first',
-    'name_last',
-    'name_middle',
-    'phone_cell',
-    'email_secondary',
-    // ... other fields
-];
+DB::table('sessions')->where('user_id', $user->id)->delete();
 ```
 
-### 5. Add Authentik to Services Config
+**This package does not create that table.** If your app uses the `file`, `cookie`, or `redis` session driver, the table does not exist and SLO fails with a database error, returning HTTP 500 to Authentik. Laravel 11+ defaults to `database`; Laravel 10 defaults to `file`.
 
-Add the following to your `config/services.php`:
+```bash
+php artisan session:table   # only if you don't already have one
+php artisan migrate
+```
+
+```env
+SESSION_DRIVER=database
+```
+
+If you deliberately run a non-database session driver, set `SSO_ENABLE_SLO=false` and handle logout propagation yourself.
+
+### 3. Add Authentik to `config/services.php`
+
+Socialite reads its credentials from here, not from `config/quadsso.php`:
 
 ```php
 'authentik' => [
     'client_id'     => env('AUTHENTIK_CLIENT_ID'),
     'client_secret' => env('AUTHENTIK_CLIENT_SECRET'),
-    'redirect'      => env('AUTHENTIK_REDIRECT_URI'),
+    'redirect'      => env('AUTHENTIK_REDIRECT_URI', env('APP_URL') . '/auth/sso/callback'),
     'base_url'      => env('AUTHENTIK_BASE_URL'),
-    'jwks_uri'      => env('AUTHENTIK_JWKS_URI'),
-    'logout_url'    => env('AUTHENTIK_LOGOUT_URL'),
 ],
 ```
 
-### 6. Configure Environment Variables
+### 4. Update your User model
 
-Add these to your `.env` file:
-
-```env
-# Authentik OAuth/OIDC Configuration
-AUTHENTIK_CLIENT_ID=your-client-id
-AUTHENTIK_CLIENT_SECRET=your-client-secret
-AUTHENTIK_REDIRECT_URI=https://your-app.com/auth/sso/callback
-AUTHENTIK_BASE_URL=https://authentik.your-domain.com
-AUTHENTIK_JWKS_URI=https://authentik.your-domain.com/application/o/your-app/jwks/
-AUTHENTIK_LOGOUT_URL=https://authentik.your-domain.com/application/o/your-app/end-session/
-
-# SCIM Configuration
-SCIM_ENABLED=true
-SCIM_BASE_PATH=/scim
-SCIM_BEARER_TOKEN=your-secure-random-token
-
-# SCIM Feature Flags
-SCIM_AUTO_PROVISION=true
-SCIM_ALLOW_USER_CREATION=true
-SCIM_ALLOW_USER_UPDATES=true
-SCIM_ALLOW_USER_DELETION=true
-SCIM_INVALIDATE_SESSIONS_ON_BLOCK=true
-
-# SCIM User Defaults
-SCIM_DEFAULT_USER_LEVEL=user
-SCIM_DEFAULT_USER_STATUS=active
-
-# SSO Configuration
-SSO_AUTO_VERIFY_EMAIL=true
-SSO_REDIRECT_AFTER_LOGIN=/home
-SSO_REDIRECT_AFTER_FAILURE=/login
-SSO_ENABLE_SLO=true
-SSO_INVALIDATE_REMEMBER_TOKENS_ON_SLO=true
-SSO_ENABLE_JIT_PROVISIONING=false
-
-# Logging (optional, for debugging)
-QUADSSO_LOG_SCIM_REQUESTS=false
-QUADSSO_LOG_SSO_EVENTS=false
-QUADSSO_LOG_SLO_EVENTS=true
-```
-
-### 7. Publish SCIM Configuration (Optional)
-
-If you want to customize the SCIM server configuration:
-
-```bash
-php artisan vendor:publish --provider="ArieTimmerman\Laravel\SCIMServer\SCIMServerServiceProvider" --tag=scim
-```
-
-Then update `config/scim.php`:
-
-```php
-return [
-    'publish_routes' => true,
-    'omit_main_schema_in_return' => false,
-    'omit_null_values' => true,
-    
-    'path' => env('SCIM_BASE_PATH', '/scim'),
-    'domain' => env('SCIM_DOMAIN', null),
-    
-    'middleware' => [\QuadCompanies\QuadSSO\Middleware\ScimBearerToken::class],
-    'public_middleware' => [],
-    
-    'bearer_token' => env('SCIM_BEARER_TOKEN'),
-    
-    'pagination' => [
-        'defaultPageSize' => 10,
-        'maxPageSize' => 100,
-        'cursorPaginationEnabled' => true,
-    ],
-    
-    'authenticationSchemes' => [
-        'oauthbearertoken',
-    ],
-];
-```
-
-## Configuration
-
-### Field Mappings
-
-Customize how SCIM/Authentik fields map to your User model in `config/quadsso.php`:
-
-```php
-'field_mappings' => [
-    'email' => 'email',
-    'external_id' => 'scim_external_id',
-    'email_verified_at' => 'email_verified_at',
-    'name_first' => 'name_first',
-    'name_last' => 'name_last',
-    'name_middle' => 'name_middle',
-    'phone_cell' => 'phone_cell',
-    'email_secondary' => 'email_secondary',
-],
-```
-
-### User Status Management
-
-Configure how user status is handled:
-
-```php
-'scim' => [
-    'user_status_field' => 'status', // Your User model's status field
-    'active_status_value' => 'active', // Value that means "active"
-    'blocked_status_value' => 'blocked', // Value that means "blocked"
-    'invalidate_sessions_on_block' => true, // Kill sessions when user is blocked
-],
-```
-
-### Feature Flags
-
-Control what SCIM operations are allowed:
-
-```php
-'scim' => [
-    'allow_user_creation' => true,  // Allow creating new users via SCIM
-    'allow_user_updates' => true,   // Allow updating existing users via SCIM
-    'allow_user_deletion' => true,  // Allow blocking users via SCIM (active=false)
-],
-```
-
-### JIT (Just-In-Time) Provisioning
-
-Enable automatic user creation on first SSO login without requiring SCIM:
-
-```php
-'sso' => [
-    'enable_jit_provisioning' => true,  // Automatically create users on first SSO login
-],
-```
-
-Or via environment variable:
-
-```env
-SSO_ENABLE_JIT_PROVISIONING=true
-```
-
-**When JIT provisioning is enabled:**
-- Users are automatically created during their first SSO login
-- Requires the IdP to assert `email_verified=true` for security
-- User data (email, name, external_id) is populated from the OAuth response
-- If a user with the same email exists but has no `scim_external_id`, they will be bound to that account
-
-**Use cases:**
-- Internal company applications where all IdP users should have access
-- Environments where you trust your IdP's authentication and want seamless onboarding
-- Migration scenarios where you're transitioning from manual user management to IdP-based auth
-
-**Note:** You can use JIT provisioning alongside SCIM. SCIM will handle bulk provisioning and updates, while JIT acts as a fallback for new users who haven't been synced yet.
-
-## Authentik Setup
-
-### 1. Create an OAuth Provider
-
-In Authentik:
-1. Go to **Applications** → **Providers** → **Create**
-2. Select **OAuth2/OpenID Provider**
-3. Configure:
-   - **Name**: Your App Name
-   - **Client Type**: Confidential
-   - **Redirect URIs**: `https://your-app.com/auth/sso/callback`
-   - **Signing Key**: Choose an appropriate certificate
-   - Enable **Back-Channel Logout URL**: `https://your-app.com/auth/sso/logout`
-
-### 2. Create an Application
-
-1. Go to **Applications** → **Create**
-2. Configure:
-   - **Name**: Your App Name
-   - **Slug**: your-app
-   - **Provider**: Select the provider created above
-
-### 3. Set Up SCIM
-
-1. Go to **Applications** → **Providers** → **Create**
-2. Select **SCIM Provider**
-3. Configure:
-   - **Name**: Your App SCIM
-   - **URL**: `https://your-app.com/scim/v2`
-   - **Token**: Your `SCIM_BEARER_TOKEN` value
-   - **Exclude service accounts**: Checked
-
-### 4. Bind SCIM Provider to Application
-
-1. Edit your application
-2. In the **Backchannel Providers** section, add your SCIM provider
-
-### 5. Configure Property Mappings (Optional)
-
-Map additional Authentik user fields to SCIM attributes as needed.
-
-## Usage
-
-### Login via SSO
-
-Users can initiate SSO login by visiting:
-
-```
-https://your-app.com/auth/sso
-```
-
-Or add a login button to your login page:
-
-```blade
-<a href="{{ route('sso.redirect') }}" class="btn btn-primary">
-    Login with SSO
-</a>
-```
-
-### Routes
-
-The package automatically registers these routes:
-
-- `GET /auth/sso` - Initiate SSO login (named `sso.redirect`)
-- `GET /auth/sso/callback` - OAuth callback (named `sso.callback`)
-- `POST /auth/sso/logout` - Back-channel logout endpoint (named `sso.logout`)
-
-SCIM routes are automatically registered by the `laravel-scim-server` package:
-- `GET /scim/v2/Users` - List users
-- `GET /scim/v2/Users/{id}` - Get user
-- `POST /scim/v2/Users` - Create user
-- `PUT /scim/v2/Users/{id}` - Update user
-- `PATCH /scim/v2/Users/{id}` - Patch user
-- `DELETE /scim/v2/Users/{id}` - Delete user (sets active=false)
-
-## How It Works
-
-### User Provisioning Flow
-
-1. **User created in Authentik** → SCIM creates user in Laravel
-2. **User updated in Authentik** → SCIM updates user in Laravel
-3. **User blocked in Authentik** → SCIM sets user status to "blocked" and kills sessions
-4. **User logs in** → OAuth redirects to Authentik → User authenticates → Callback creates session
-
-### Single Logout Flow
-
-1. **User logs out from Authentik** → Authentik sends back-channel logout JWT
-2. **Laravel verifies JWT** → Finds user by `scim_external_id`
-3. **Sessions deleted** → User is logged out from all devices
-4. **Remember tokens cycled** → "Remember me" cookies are invalidated
-
-### JIT (Just-In-Time) Provisioning Flow (Optional)
-
-If you enable JIT provisioning with `SSO_ENABLE_JIT_PROVISIONING=true`, users will be automatically created on their first SSO login without needing SCIM:
-
-1. **User logs in via SSO** → Doesn't exist in Laravel yet
-2. **IdP verifies user** → Returns verified email and profile data
-3. **Laravel creates user** → Automatically provisions user with data from IdP
-4. **Session created** → User is logged in immediately
-
-**Security considerations:**
-- Requires `email_verified=true` from the IdP (prevents unverified email attacks)
-- Checks for email collisions before creating users
-- Can bind to existing users that have no `scim_external_id` yet
-- Best suited for environments where you trust all IdP-authenticated users
-
-**When to use JIT vs SCIM:**
-- **Use JIT** when you want open access for any authenticated IdP user (e.g., internal company apps)
-- **Use SCIM** when you need explicit control over who can access your app (e.g., customer-facing SaaS)
-- You can use both together: SCIM for bulk provisioning, JIT as a fallback for new users
-
-## Customization
-
-### Extended User Fields (Optional)
-
-By default, QuadSSO maps SCIM name fields to Laravel's standard single `name` column. If you want separate fields for first/last/middle names and additional contact fields:
-
-**1. Run the optional extended fields migration:**
-
-```bash
-php artisan migrate --path=vendor/quadcompanies/quadsso/database/migrations/2024_01_01_000002_add_extended_quadsso_fields_to_users_table.php
-```
-
-This adds: `name_first`, `name_last`, `name_middle`, `phone_cell`, `email_secondary`
-
-**2. Update `config/quadsso.php` to enable these mappings:**
-
-```php
-'field_mappings' => [
-    'email' => 'email',
-    'external_id' => 'scim_external_id',
-    'email_verified_at' => 'email_verified_at',
-    
-    // Enable extended name fields
-    'name_first' => 'name_first',   // Changed from null
-    'name_last' => 'name_last',     // Changed from null
-    'name_middle' => 'name_middle', // Changed from null
-    'name' => null,                 // Disable single name field
-    
-    // Enable contact fields
-    'phone_cell' => 'phone_cell',           // Changed from null
-    'email_secondary' => 'email_secondary', // Changed from null
-],
-```
-
-**3. Add to User model's `$fillable`:**
+Add the columns QuadSSO writes to your `$fillable`:
 
 ```php
 protected $fillable = [
+    'name',
     'email',
     'password',
     'scim_external_id',
     'email_verified_at',
     'status',
-    'name_first',
-    'name_last',
-    'name_middle',
-    'phone_cell',
-    'email_secondary',
+    'level',
 ];
 ```
 
-> **⚠️ Schema Validation:** The package automatically checks if configured field mappings exist in your database schema. If you see warnings in your logs about missing columns, either run the extended migration or set those mappings to `null` in the config.
+The package works with Laravel's standard users table as-is: the IdP's display name goes into the single `name` column.
 
-### Custom User Model
+### 5. Choose a provisioning mode
 
-If you use a custom user model, update `config/quadsso.php`:
+See [Provisioning](#provisioning) — this is the one decision you have to make deliberately.
+
+### 6. Put a login button on your login page
+
+```blade
+<x-quadsso::login-button />
+```
+
+If your app uses Tailwind, add the package's views to your content sources or the button's classes will be purged — see [The login button](#the-login-button).
+
+---
+
+## Provisioning
+
+Users have to get into your database somehow. There are two supported paths, and **you must pick one** or nobody will be able to log in.
+
+### JIT (recommended for internal apps)
+
+```env
+SSO_ENABLE_JIT_PROVISIONING=true
+```
+
+The first time someone completes an SSO login, their account is created from the IdP's claims. No pre-provisioning, no admin step.
+
+This is **off by default** because it is an access-control decision: every user who can authenticate at Authentik *and* is assigned to this application gets a local account. Authentik enforces the assignment check during the authorization step, so the effective gate is your application's Authentik policy bindings — make sure those are correct before enabling this.
+
+JIT additionally requires the IdP to assert `email_verified=true`, and refuses when the email already belongs to a different local identity.
+
+### Manual creation + first-login binding
+
+Leave JIT off, create users through your own admin tooling, and let the first login attach the IdP identity:
+
+```env
+SSO_ENABLE_JIT_PROVISIONING=false
+SSO_ALLOW_LEGACY_EMAIL_BINDING=true
+```
+
+The user must already exist locally with a matching email and a NULL `scim_external_id`. On first login, the IdP's `sub` is written onto that row. Use this when access must be granted explicitly inside your application.
+
+---
+
+## How identity is resolved
+
+Identity is resolved by the OIDC `sub` claim, stored in `scim_external_id`. **Email is not an identifier** — treating it as one would let anyone with self-service email change pre-claim another user's account. The callback tries three things in order:
+
+1. **Look up by `scim_external_id`.** Authoritative.
+2. **Legacy email binding** (`SSO_ALLOW_LEGACY_EMAIL_BINDING`, on by default). If nothing matched, find a row with that email **and a NULL `scim_external_id`**, then write the `sub` onto it. Requires `email_verified=true`. Happens once; every later login resolves by `sub`.
+3. **JIT provisioning** (`SSO_ENABLE_JIT_PROVISIONING`, off by default). Create the user from the OIDC response.
+
+If all three miss, login is refused with "No account found for this identity."
+
+> **When to disable legacy binding.** Step 2 is safe for most deployments: it needs IdP-verified email, fires only against unbound rows, and never runs again for that user. Set `SSO_ALLOW_LEGACY_EMAIL_BINDING=false` only if your application allows users to change their email **without** re-verification.
+
+Once a user is resolved, their name and email are refreshed from the IdP on every login (`SSO_SYNC_ATTRIBUTES_ON_LOGIN`, on by default). Email is only followed when the IdP asserts it is verified and no other local row already holds it.
+
+---
+
+## Revocation: what happens when someone is deprovisioned
+
+This matters more than it looks, and it is the main tradeoff of a JIT-only design. **Nothing in this package runs between logins.** All identity checks happen during the OIDC callback, so deactivating a user in Authentik has no immediate local effect on its own.
+
+What actually stops a deprovisioned user:
+
+| Mechanism | Effect | Timing |
+|---|---|---|
+| Authentik refuses the authorization request | They cannot start a new session | Immediate, but only on next login attempt |
+| Back-channel SLO | Existing sessions deleted, remember token cycled | Immediate — **if** your IdP fires it on deactivation |
+| Session expiry | Existing session dies | Bounded by `SESSION_LIFETIME` |
+
+So the exposure window for an already-signed-in user is **`SESSION_LIFETIME`, unless back-channel logout fires on deactivation**. Set `SESSION_LIFETIME` to something you're comfortable with.
+
+**This is why `SSO_REMEMBER_LOGIN` defaults to `false`.** A remember-me cookie lasts five years by default and would survive deprovisioning entirely, converting a bounded window into an unbounded one. Only turn it on once you have confirmed SLO fires.
+
+### Verifying that back-channel logout fires on deactivation
+
+Worth testing directly — Authentik's behaviour here depends on your version and flow configuration.
+
+```bash
+# 1. Watch the log
+tail -f storage/logs/laravel.log | grep QuadSSO
+```
+
+With `QUADSSO_LOG_SLO_EVENTS=true` (the default):
+
+2. Log into your app via SSO in a browser. Confirm a row appears:
+   `select id, user_id from sessions where user_id = <id>;`
+3. In Authentik, **deactivate** that user (uncheck *Active* on the user — do **not** log out from the browser).
+4. Watch for `QuadSSO SLO: sessions invalidated` in the log, and re-run the query.
+
+- **Row gone, log line present** → SLO fires on deactivation. Revocation is immediate; you may enable `SSO_REMEMBER_LOGIN` if you want it.
+- **Nothing happens** → deactivation does not notify your app. Keep remember-me off, keep `SESSION_LIFETIME` short, and block the user in your own application as well (see [Blocking users locally](#blocking-users-locally)).
+
+### Blocking users locally
+
+The SSO callback refuses login when the user's status column holds `QUADSSO_BLOCKED_STATUS_VALUE`, or when your model's `isBlocked()` method returns true. **Nothing in this package writes that value** — it is there for your own admin tooling to set. If you need a local kill switch independent of Authentik, set it there.
+
+---
+
+## Locking out local authentication
+
+If your app still has Breeze, Fortify, Jetstream, or Laravel UI scaffolding installed, its registration and password-reset routes remain live alongside SSO. **Password reset is an SSO bypass.** A user provisioned through SSO holds a random, unusable password — but the reset flow will happily send them a link at their IdP-verified address, let them set a password they know, and from then on they authenticate locally. That path never touches Authentik, so it also survives deactivation there.
+
+Turn the block on:
+
+```env
+QUADSSO_DISABLE_LOCAL_AUTH=true
+```
+
+The package then pushes a middleware onto the `web` group that matches each resolved route against a list of names, falling back to URI patterns for unnamed routes, and either redirects to `/auth/sso` or returns 404.
+
+Both lists are in `config/quadsso.php` and cover the common scaffolds by default:
+
+```php
+'disable_local_auth' => [
+    'route_names' => ['register', 'register.store', 'password.request',
+                      'password.email', 'password.reset', 'password.store',
+                      'password.update'],
+    'paths' => ['register', 'register/*', 'password/*',
+                'forgot-password', 'reset-password', 'reset-password/*'],
+],
+```
+
+Two deliberate omissions:
+
+- **`login` is not blocked.** Removing it takes away your break-glass path if SSO itself breaks. Add it only once you're sure you can always reach Authentik.
+- **`password.confirm` is not blocked.** It verifies an existing password rather than setting one, so it isn't a bypass, and blocking it breaks Jetstream/Fortify flows that gate sensitive actions behind confirmation.
+
+Note that `password.update` names the reset submission in Laravel UI but the authenticated "change my password" screen in Breeze. Blocking both is intended for an SSO-only app.
+
+### This is defence in depth, not a guarantee
+
+The middleware matches known route names and paths. An application with its own registration controller on an unlisted path is not caught, and no package can promise otherwise — the host app owns its routes.
+
+The durable fix is to make password authentication impossible at the model level, where no route configuration can route around it:
+
+```php
+// in your User model — the local password can never satisfy a check
+public function getAuthPassword() { return null; }
+```
+
+Best is both: the middleware so the routes stop being reachable and stop appearing in your UI, and the model-level change so that even a missed route can't authenticate anyone.
+
+---
+
+## Management API
+
+An opt-in `POST` endpoint for terminating or removing an account from outside the SSO flow — an offboarding job, an admin tool, a webhook from your HR system.
+
+```env
+QUADSSO_MGMT_ENABLED=true
+QUADSSO_MGMT_API_KEY=a-long-random-string
+```
+
+```bash
+php artisan tinker --execute="echo \Illuminate\Support\Str::random(64);"
+```
+
+While disabled the route is **not registered at all**, so the path 404s rather than answering 401 — an unconfigured install doesn't advertise that an account-deletion endpoint exists.
+
+### Requests
+
+```http
+POST /api/quadsso-mgr
+X-QuadSSO-Key: a-long-random-string
+Content-Type: application/json
+
+{"action": "SUSPEND", "email": "user@example.com"}
+```
+
+`Authorization: Bearer <key>` works too, for callers that only speak bearer auth. The path and header name are configurable (`QUADSSO_MGMT_PATH`, `QUADSSO_MGMT_HEADER`).
+
+| Action | Effect |
+|---|---|
+| `SUSPEND` | Delete the user's session rows, cycle the remember token, set the status column to the blocked value |
+| `DELETE` | Everything `SUSPEND` does, then remove the row |
+
+Users are identified by email address. Actions are case-insensitive.
+
+```json
+{"status": "ok", "action": "SUSPEND", "user_id": 42, "sessions_cleared": 3, "post_hook_failed": false}
+```
+
+| Status | Meaning |
+|---|---|
+| `200` | Done |
+| `401` | Missing or wrong key |
+| `404` | No user with that email |
+| `409` | A `before` hook vetoed it — nothing was changed |
+| `422` | Missing or unknown action, or malformed email |
+| `500` | The configured hooks class could not be resolved — nothing was changed |
+| `503` | No API key configured; the endpoint refuses to serve unauthenticated |
+
+Cycling the remember token is part of `SUSPEND`, not an extra: a remember-me cookie outlives session rows, so without it "end the session" wouldn't.
+
+`DELETE` uses `forceDelete()` when the model soft-deletes, so the row really leaves the table. Set `QUADSSO_MGMT_FORCE_DELETE=false` to keep soft-delete semantics — the account is marked blocked before deletion either way, so a restored row is still refused at login.
+
+The endpoint ships rate-limited at 60 requests/minute. Change or remove that with `management.middleware` in the config.
+
+### Hooks
+
+Point the config at a class extending `NullUserLifecycleHooks` and override only what you need. It is resolved from the container, so constructor injection works.
+
+```php
+namespace App\Sso;
+
+use Illuminate\Database\Eloquent\Model;
+use QuadCompanies\QuadSSO\Support\NullUserLifecycleHooks;
+
+class OffboardingHooks extends NullUserLifecycleHooks
+{
+    public function __construct(private BillingClient $billing) {}
+
+    public function beforeDelete(Model $user): void
+    {
+        if ($this->billing->hasOpenInvoices($user)) {
+            throw new \RuntimeException('user has open invoices');   // vetoes the request
+        }
+
+        $this->billing->closeAccount($user);
+    }
+
+    public function afterDelete(Model $user): void
+    {
+        Log::info('offboarded', ['email' => $user->email]);
+    }
+}
+```
+
+```env
+QUADSSO_MGMT_HOOKS="App\Sso\OffboardingHooks"
+```
+
+Four hooks: `beforeSuspend`, `afterSuspend`, `beforeDelete`, `afterDelete`.
+
+**A throwing `before` hook vetoes the operation.** Nothing is written and the API responds `409` carrying your exception message. That is the supported way to protect an account from deletion.
+
+**A throwing `after` hook does not roll anything back** — the change is already committed by then. It is caught, logged, and reported as `"post_hook_failed": true` alongside a `200`. Returning an error there would invite the caller to retry an action that already took effect.
+
+The `before` hook sees the account as it was; the `after` hook sees it changed. For `DELETE` specifically, `beforeDelete` runs while the row still exists and `afterDelete` runs once it is gone — the model still carries its attributes in memory, but it is detached, so reloading it finds nothing.
+
+---
+
+## Environment variables
+
+### Required
+
+| Variable | Notes |
+|---|---|
+| `AUTHENTIK_CLIENT_ID` | Also verified as the `aud` claim on logout tokens. |
+| `AUTHENTIK_CLIENT_SECRET` | Read via `config/services.php`. |
+| `AUTHENTIK_REDIRECT_URI` | Must match the redirect URI registered in Authentik. Read via `config/services.php`. |
+| `AUTHENTIK_BASE_URL` | Also verified as the `iss` prefix on logout tokens. |
+| `AUTHENTIK_JWKS_URI` | Verifies the SLO logout token signature. Required unless `SSO_ENABLE_SLO=false`. |
+
+### Optional
+
+Every value below is the package default; set the variable only to change it.
+
+**Provisioning mode** — see [Provisioning](#provisioning)
+
+| Variable | Default | Effect |
+|---|---|---|
+| `SSO_ENABLE_JIT_PROVISIONING` | `false` | Create users on first SSO login. |
+| `SSO_ALLOW_LEGACY_EMAIL_BINDING` | `true` | One-time bind of the IdP `sub` onto an existing row matched by email. |
+
+**Session and revocation** — see [Revocation](#revocation-what-happens-when-someone-is-deprovisioned)
+
+| Variable | Default | Effect |
+|---|---|---|
+| `SSO_REMEMBER_LOGIN` | `false` | Issue a remember-me cookie on login. Outlives deprovisioning — leave off unless SLO is confirmed working. |
+| `SSO_ENABLE_SLO` | `true` | Accept back-channel logout. When false, the endpoint returns 403. |
+| `SSO_INVALIDATE_REMEMBER_TOKENS_ON_SLO` | `true` | Cycle `remember_token` on logout. |
+
+**Locking out local authentication** — see [Locking out local auth](#locking-out-local-authentication)
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUADSSO_DISABLE_LOCAL_AUTH` | `false` | Block the app's registration and password-reset routes. |
+| `QUADSSO_LOCAL_AUTH_RESPONSE` | `redirect` | `redirect` or `404`. |
+| `QUADSSO_LOCAL_AUTH_REDIRECT` | `/auth/sso` | Where `redirect` sends the visitor. |
+
+**Login behaviour**
+
+| Variable | Default | Effect |
+|---|---|---|
+| `SSO_SYNC_ATTRIBUTES_ON_LOGIN` | `true` | Refresh name/email from the IdP on every login. |
+| `SSO_AUTO_VERIFY_EMAIL` | `true` | Stamp `email_verified_at` on first login — only when the IdP asserts `email_verified=true`. |
+| `SSO_REDIRECT_AFTER_LOGIN` | `/home` | URL **path**, not a route name. |
+| `SSO_REDIRECT_AFTER_FAILURE` | `/login` | URL **path**, not a route name. |
+
+**User defaults and column names**
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUADSSO_APPLY_DEFAULTS` | `true` | Register the observer that sets password/level/status on create. |
+| `QUADSSO_DEFAULT_USER_LEVEL` | `user` | Value written to the level column on create. Empty disables it. |
+| `QUADSSO_DEFAULT_USER_STATUS` | `active` | Value written to the status column on create. |
+| `QUADSSO_USER_LEVEL_FIELD` | `level` | Column storing the user role/level. The level migration creates whatever you name here. |
+| `QUADSSO_USER_STATUS_FIELD` | `status` | Column storing account status. |
+| `QUADSSO_BLOCKED_STATUS_VALUE` | `blocked` | Status value that denies login. Written by your app, read by this package. |
+
+**Management API** — see [Management API](#management-api)
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUADSSO_MGMT_ENABLED` | `false` | Register the endpoint at all. |
+| `QUADSSO_MGMT_API_KEY` | — | Shared secret. Required once enabled; the endpoint 503s without it. |
+| `QUADSSO_MGMT_HEADER` | `X-QuadSSO-Key` | Header carrying the key. Bearer tokens also accepted. |
+| `QUADSSO_MGMT_PATH` | `api/quadsso-mgr` | Endpoint path. |
+| `QUADSSO_MGMT_FORCE_DELETE` | `true` | Bypass soft deletes so `DELETE` really removes the row. |
+| `QUADSSO_MGMT_HOOKS` | — | Class extending `NullUserLifecycleHooks`, run around each action. |
+
+**Other**
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUADSSO_USER_MODEL` | `App\Models\User` | Custom user model. |
+| `QUADSSO_BUTTON_LABEL` | `Login via SSO` | Default label for the login button component. |
+| `QUADSSO_LOG_SSO_EVENTS` | `false` | Log login redirect/callback detail. |
+| `QUADSSO_LOG_SLO_EVENTS` | `true` | Log back-channel logout detail. |
+
+---
+
+## Database changes
+
+QuadSSO **alters your existing `users` table** and creates no tables of its own. All three migrations are registered by the service provider, so **`php artisan migrate` runs all of them**. Every column is guarded by a `hasColumn` check, so existing columns are left untouched and re-running is safe.
+
+To pick and choose, publish them and delete what you don't want:
+
+```bash
+php artisan vendor:publish --tag=quadsso-migrations
+```
+
+### `2024_01_01_000001` — core fields
+
+| Column | Type | Purpose |
+|---|---|---|
+| `scim_external_id` | `string` nullable **unique** | The OIDC `sub` / Authentik UUID. The authoritative identity key. Retains its historical name so 1.x installs need no data migration. |
+| `email_verified_at` | `timestamp` nullable | Standard Laravel column; added only if missing. |
+| `status` | `string` default `active` | Read by the login block check. |
+
+Rollback drops only `scim_external_id`. `status` and `email_verified_at` are left in place because the host app may depend on them.
+
+### `2024_01_01_000002` — extended fields
+
+Split name and contact columns, all `string` nullable: `name_first`, `name_last`, `name_middle`, `phone_cell`, `email_secondary`.
+
+These columns are **created by default** but **not used by default** — the corresponding `field_mappings` entries ship as `null`. To populate them see [Extended user fields](#extended-user-fields). Rollback drops all five.
+
+### `2024_01_01_000003` — level column
+
+| Column | Type | Purpose |
+|---|---|---|
+| `level` | `string` nullable default `user` | Role/level written by the provisioning observer. |
+
+The column name follows `QUADSSO_USER_LEVEL_FIELD`, so pointing that at a role column you already have makes this migration a no-op. Rollback is deliberately a no-op: a role column is commonly shared with the host app's own authorization logic, and the migration cannot tell whether it owns the column.
+
+> **Why this column is required.** The observer sets a default level on **every** user it creates — this is a global `creating` model event, so it fires for your own registration flows and seeders too, not just SSO logins. Set `QUADSSO_DEFAULT_USER_LEVEL=` (empty) to switch that behaviour off entirely.
+
+### Columns expected to already exist
+
+From Laravel's standard users table: `id`, `email`, `name`, `password` (the observer writes a random hash for provisioned users), and `remember_token` (cycled on SLO).
+
+---
+
+## Authentik setup
+
+### 1. OAuth provider
+
+**Applications → Providers → Create → OAuth2/OpenID Provider**
+
+- **Client type**: Confidential
+- **Redirect URIs**: `https://your-app.com/auth/sso/callback`
+- **Signing key**: any configured certificate
+- **Back-channel logout URL**: `https://your-app.com/auth/sso/logout`
+
+Note the generated Client ID and Client Secret.
+
+### 2. Application
+
+**Applications → Create** — set a name and slug, and select the provider above.
+
+### 3. Assign users
+
+On the application, **Edit → Assigned permissions**, add the users or groups who should have access. With JIT enabled this binding *is* your access control — see [Provisioning](#provisioning).
+
+---
+
+## Usage
+
+Send users to `/auth/sso`. The package ships a Blade component for the login form:
+
+```blade
+<x-quadsso::login-button />
+```
+
+That renders an anchor pointing at the SSO route, labelled **Login via SSO**, with Tailwind styling.
+
+### The login button
+
+**Relabel it** per usage, or everywhere at once with `QUADSSO_BUTTON_LABEL`:
+
+```blade
+<x-quadsso::login-button text="Sign in with Acme ID" />
+```
+
+**Recolour it** by passing a background. The default indigo palette steps aside as soon as you supply one, because Tailwind resolves competing utilities by stylesheet order rather than by the order they appear in the class attribute — emitting both would make the winner depend on how your palette happens to be ordered:
+
+```blade
+<x-quadsso::login-button class="w-full bg-emerald-600 text-white hover:bg-emerald-500" />
+```
+
+Structural classes (spacing, radius, font, focus ring) always survive, so you keep the shape and change only the colour. If you supply your own background, supply a text colour too.
+
+**Take over completely** with `:unstyled`, which emits no classes at all — useful with a design system of your own:
+
+```blade
+<x-quadsso::login-button :unstyled="true" class="btn btn-primary" />
+```
+
+**Add an icon** — slot content replaces the label entirely:
+
+```blade
+<x-quadsso::login-button class="w-full">
+    <svg class="h-4 w-4" aria-hidden="true"><!-- ... --></svg>
+    Sign in with Acme ID
+</x-quadsso::login-button>
+```
+
+Any other attribute (`id`, `data-*`, `aria-*`, `wire:navigate`) passes through to the anchor.
+
+**Directive form**, if you'd rather not write a component tag:
+
+```blade
+@ssoLoginButton
+@ssoLoginButton('Sign in with Acme ID')
+```
+
+It renders exactly the same markup, but takes a label only — anything needing classes, a slot, or other attributes should use the component.
+
+#### Tailwind has to be told where the component lives
+
+The component ships inside `vendor/`, which Tailwind does not scan by default. Without this the classes it emits are purged and the button renders as a bare link — the most common reason a packaged Tailwind component "doesn't work".
+
+Tailwind v4, in your CSS entrypoint:
+
+```css
+@source "../../vendor/quadcompanies/quadsso/resources/views";
+```
+
+Tailwind v3, in `tailwind.config.js`:
+
+```js
+export default {
+    content: [
+        './resources/**/*.blade.php',
+        './vendor/quadcompanies/quadsso/resources/views/**/*.blade.php',
+    ],
+};
+```
+
+Publishing the view (below) sidesteps this entirely, since the published copy sits under `resources/views/`, which is already scanned.
+
+**Not using Tailwind?** Use `:unstyled` and bring your own classes — the component then emits nothing but the `href` and whatever you pass:
+
+```blade
+<x-quadsso::login-button :unstyled="true" class="btn btn-primary" />
+```
+
+**Customise the markup** by publishing the view:
+
+```bash
+php artisan vendor:publish --tag=quadsso-views
+```
+
+It lands at `resources/views/vendor/quadsso/components/login-button.blade.php`.
+
+### Routes
+
+| Method | URI | Name | Middleware |
+|---|---|---|---|
+| `GET` | `/auth/sso` | `sso.redirect` | `web`, `guest` |
+| `GET` | `/auth/sso/callback` | `sso.callback` | `web` |
+| `POST` | `/auth/sso/logout` | `sso.logout` | *(none — see below)* |
+
+The SLO endpoint is intentionally outside the `web` group. Authentik posts a signed JWT server-to-server with no session and no CSRF token; inside `web`, `VerifyCsrfToken` would reject every request with HTTP 419. It authenticates by JWT signature, issuer, audience, and `jti` replay check instead.
+
+### Flows
+
+**Login** — user hits `/auth/sso` → authenticates at Authentik → callback resolves identity → blocked users are refused → attributes synced → `Auth::login()`.
+
+**Single Logout** — user logs out of Authentik → Authentik `POST`s a signed `logout_token` to `/auth/sso/logout` → signature, issuer, audience, `backchannel-logout` event claim, and `jti` replay are all verified → sessions deleted and remember token cycled.
+
+---
+
+## Customization
+
+### Field mappings
+
+Map IdP claims onto your own columns in `config/quadsso.php`. `null` disables a mapping.
+
+```php
+'field_mappings' => [
+    'email' => 'email',
+    'external_id' => 'scim_external_id',
+    'email_verified_at' => 'email_verified_at',
+    'name' => 'name',
+    'name_first' => null,
+    'name_last' => null,
+    'name_middle' => null,
+    'phone_cell' => null,
+    'email_secondary' => null,
+],
+```
+
+The package logs a warning at boot for any mapping that points at a column your `users` table doesn't have.
+
+### Extended user fields
+
+The columns already exist after `migrate`; enable the mappings and turn off the combined `name` field:
+
+```php
+'field_mappings' => [
+    // ...
+    'name' => null,               // was 'name'
+    'name_first' => 'name_first',  // was null
+    'name_last' => 'name_last',    // was null
+],
+```
+
+When both `name_first` and `name_last` are set, the IdP's display name is split on the first space. `name_middle`, `phone_cell`, and `email_secondary` have no corresponding OIDC claim and are not populated by login — they exist for your own use.
+
+Then add each one to your User model's `$fillable`.
+
+### Status handling
+
+```php
+'provisioning' => [
+    'user_status_field'    => 'account_status',
+    'blocked_status_value' => 'disabled',
+],
+```
+
+The callback also honours an `isBlocked()` method on your User model if one exists.
+
+**The status column is required, and the check fails closed.** `$user->$statusField` is attribute access, not a query — a column name that doesn't exist reads back as `null`, `null` never equals the blocked value, and the block check would quietly pass, admitting suspended accounts with no error anywhere. So a status attribute that can't be resolved refuses the login instead. Locking everyone out on a typo is loud and fixed in minutes; admitting terminated staff is neither.
+
+Three things satisfy the check: a real column, a classic `getFooAttribute()` accessor, or an `Attribute`-class accessor. Two things opt out of it: an `isBlocked()` method on your model, or an empty `QUADSSO_BLOCKED_STATUS_VALUE`, which disables status-based blocking as a deliberate choice rather than a typo.
+
+The boot-time schema check also warns about a missing status or level column, so the misconfiguration shows up in your logs before anyone hits it.
+
+### Custom user model
 
 ```php
 'user_model' => \App\Models\CustomUser::class,
 ```
 
-### Disable Auto-Provisioning
+### Disable default assignment
 
-If you want to manually handle user creation instead of the automatic observer:
+To handle user creation entirely yourself, set `'provisioning' => ['apply_defaults' => false]`. This also disables the random-password and default status/level assignment — you must supply those yourself, including a password, or user creation will fail on a non-nullable column.
 
-```php
-'scim' => [
-    'auto_provision' => false,
-],
-```
+---
 
-### Custom Redirect Routes
+## Upgrading from 1.x
 
-Change where users are redirected after login/logout:
+**2.0 removes SCIM provisioning.** If you provision users through Authentik's SCIM provider, do not upgrade until you have switched to JIT.
 
-```php
-'sso' => [
-    'redirect_after_login' => '/dashboard',
-    'redirect_after_failure' => '/login',
-],
-```
+1. **Enable JIT before upgrading**, so users keep being created: `SSO_ENABLE_JIT_PROVISIONING=true`.
+2. **Remove the SCIM provider** from your Authentik application's Backchannel Providers. Left in place, it will start receiving HTTP 404s.
+3. **Drop these environment variables** — they no longer do anything: `SCIM_BEARER_TOKEN`, `SCIM_AUTO_PROVISION`, `SCIM_ALLOW_USER_CREATION`, `SCIM_ALLOW_USER_UPDATES`, `SCIM_ALLOW_USER_DELETION`, `SCIM_INVALIDATE_SESSIONS_ON_BLOCK`, `SCIM_ALLOW_LEGACY_EMAIL_MERGE`, `SCIM_ACTIVE_STATUS_VALUE`, `QUADSSO_LOG_SCIM_REQUESTS`.
+4. **Rename these**, which kept their meaning:
 
-### Additional Field Mappings
+   | 1.x | 2.0 |
+   |---|---|
+   | `SCIM_DEFAULT_USER_LEVEL` | `QUADSSO_DEFAULT_USER_LEVEL` |
+   | `SCIM_DEFAULT_USER_STATUS` | `QUADSSO_DEFAULT_USER_STATUS` |
+   | `SCIM_USER_LEVEL_FIELD` | `QUADSSO_USER_LEVEL_FIELD` |
+   | `SCIM_USER_STATUS_FIELD` | `QUADSSO_USER_STATUS_FIELD` |
+   | `SCIM_BLOCKED_STATUS_VALUE` | `QUADSSO_BLOCKED_STATUS_VALUE` |
 
-If your User model has custom fields, add them to the SCIM configuration by extending `QuadSSOScimConfig`:
+   These are silent if missed: a renamed variable falls back to its default, so a custom `SCIM_USER_STATUS_FIELD=account_status` would quietly revert to `status`. Check yours.
 
-```php
-namespace App\Scim;
+5. **Republish the config** if you published it: `php artisan vendor:publish --tag=quadsso-config --force` (back up your copy first — the `scim` section is now `provisioning`).
+6. **Blocking is now yours to drive.** SCIM used to set the blocked status and delete sessions. Nothing writes it now — see [Blocking users locally](#blocking-users-locally).
+7. **Check `SSO_REMEMBER_LOGIN`.** 1.x always issued a remember-me cookie; 2.0 defaults to not issuing one. Existing cookies keep working until they expire or SLO cycles the token. Set it to `true` to keep the old behaviour, after reading [Revocation](#revocation-what-happens-when-someone-is-deprovisioned).
 
-use QuadCompanies\QuadSSO\Scim\QuadSSOScimConfig;
+No data migration is required. The `scim_external_id` column keeps its name.
 
-class CustomScimConfig extends QuadSSOScimConfig
-{
-    // Override methods to add custom field mappings
-}
-```
-
-Then bind your custom config in `AppServiceProvider`:
-
-```php
-use ArieTimmerman\Laravel\SCIMServer\SCIMConfig;
-use App\Scim\CustomScimConfig;
-
-public function register(): void
-{
-    $this->app->bind(SCIMConfig::class, CustomScimConfig::class);
-}
-```
+---
 
 ## Troubleshooting
 
-### Enable Debug Logging
-
-Set these in your `.env`:
+Enable verbose logging, then check `storage/logs/laravel.log`:
 
 ```env
-QUADSSO_LOG_SCIM_REQUESTS=true
 QUADSSO_LOG_SSO_EVENTS=true
 QUADSSO_LOG_SLO_EVENTS=true
 ```
 
-Then check `storage/logs/laravel.log` for detailed logs.
+| Symptom | Cause |
+|---|---|
+| `No account found for this identity` | No provisioning path matched. Enable JIT, or create the user locally first. Check they're assigned to the application in Authentik. |
+| `Your email address has not been verified...` | The IdP returned `email_verified=false`. The package will not bind or provision on an unverified address. |
+| `Your account has been suspended` | The user's status column holds the blocked value. |
+| Name/email changes at the IdP don't appear | `SSO_SYNC_ATTRIBUTES_ON_LOGIN=false`, or the email is already held by another local user (logged as a warning). |
+| SLO returns 500 | Usually a missing `sessions` table — see [Session driver](#session-driver). |
+| SLO returns 400 | Signature, issuer, audience, `jti` replay, or event-claim check failed. Confirm `AUTHENTIK_BASE_URL`, `AUTHENTIK_CLIENT_ID`, and `AUTHENTIK_JWKS_URI`. |
+| SLO returns 419 | The route landed inside the `web` middleware group. |
+| Users stay logged in after deactivation | Expected unless SLO fires on deactivation — see [Revocation](#revocation-what-happens-when-someone-is-deprovisioned). |
+| Login button renders unstyled | Tailwind is purging the package's classes; add its views to your content sources, publish the view, or use `:unstyled`. |
+| `Your account status could not be verified` | `QUADSSO_USER_STATUS_FIELD` names a column that doesn't exist. Logins are refused rather than admitted, because a status that can't be read can't be checked. Point it at a real column, or set `QUADSSO_BLOCKED_STATUS_VALUE` empty to disable status-based blocking. |
+| Column-not-found on user create | A mapped column is missing. Run `migrate`, or set that mapping to `null`. |
 
-### Common Issues
-
-#### "SCIM bearer token not configured"
-
-Make sure `SCIM_BEARER_TOKEN` is set in your `.env` file.
-
-#### "No account found for this identity"
-
-The user hasn't been provisioned via SCIM yet. Make sure:
-1. SCIM provider is configured in Authentik
-2. SCIM provider is bound to your application
-3. User exists in Authentik and is assigned to the application
-
-#### "Your account has been suspended"
-
-The user's status field is set to the blocked value. Check:
-1. User's status in the database
-2. `SCIM_ACTIVE_STATUS_VALUE` and `SCIM_BLOCKED_STATUS_VALUE` settings
-
-#### Sessions not being invalidated on logout
-
-Make sure:
-1. `SSO_ENABLE_SLO=true` in your `.env`
-2. Back-channel logout URL is configured in Authentik
-3. JWKS URI is correct and accessible
+---
 
 ## Security
 
-### 🔒 SCIM Endpoint Protection
+- Identity is resolved by the OIDC `sub` claim, never by email.
+- SLO logout tokens are verified for signature (JWKS, cached 1 hour), issuer, audience, the `backchannel-logout` event claim, and `jti` replay within a 15-minute window.
+- JIT provisioning and first-login binding both require the IdP to assert `email_verified=true`.
+- Provisioned users get a random 32-character password hash, so the local password is unusable.
+- Remember-me is off by default, bounding post-deprovisioning access to `SESSION_LIFETIME`.
 
-**The package automatically secures SCIM endpoints** with bearer token authentication. The `ScimBearerToken` middleware is auto-configured to protect all `/scim/v2/*` routes.
+**Recommended:** serve everything over HTTPS, keep `SESSION_LIFETIME` aligned with how quickly you need deprovisioning to take effect, and rotate your Authentik client secret periodically.
 
-**To verify security is working:**
+---
+
+## Tests
 
 ```bash
-# Should return 401 Unauthorized
-curl http://your-app.local/scim/v2/Users
-
-# Should return user data (with valid token)
-curl -H "Authorization: Bearer your-token-here" http://your-app.local/scim/v2/Users
+composer install
+composer test
 ```
 
-### Best Practices
+The suite runs against Testbench with an in-memory SQLite database. It is written as a set of security properties rather than coverage of every branch:
 
-- ✅ Always use HTTPS in production
-- ✅ Generate a strong random token for `SCIM_BEARER_TOKEN`:
-  ```bash
-  php artisan tinker --execute="echo \Illuminate\Support\Str::random(64);"
-  ```
-- ✅ Keep your `SCIM_BEARER_TOKEN` secure - treat it like a password
-- ✅ Regularly rotate your Authentik client secrets and SCIM tokens
-- ✅ Monitor your logs for unauthorized SCIM access attempts (enable `QUADSSO_LOG_SCIM_REQUESTS=true`)
-- ✅ Use firewall rules to restrict SCIM endpoint access to Authentik's IP addresses if possible
+| Suite | Guards |
+|---|---|
+| `IdentityResolutionTest` | Who is allowed to become which local row — sub-over-email precedence, one-time binding, JIT gating, blocked users |
+| `SloTokenTest` | Logout tokens are the endpoint's only access control: forged keys, `alg: none`, RS→HS confusion, foreign issuer, wrong audience, replay |
+| `ConfigInjectionTest` | IdP-supplied values stay data; config-supplied column names fail closed |
+| `SchemaValidationTest` | The boot-time warning covers every config key that names a column, not just `field_mappings` |
+| `RouteGuardTest` | The middleware stack on each route, including that SLO stays outside `web` |
+| `ManagementApiTest` / `Disabled` / `Throttle` | Key enforcement, action semantics, hook ordering and veto, and that the route does not exist while disabled |
+| `LoginButtonTest` | The button's destination, labelling, escaping, and that caller styling wins |
+| `LocalAuthLockoutTest` / `LocalAuthPassthroughTest` | The registration/reset lockout blocks what it should and nothing else, and stays off until asked |
+
+---
 
 ## License
 
-MIT
+MIT. See [CHANGELOG.md](CHANGELOG.md) for version history.
 
-## Support
-
-For issues and questions, please open an issue on GitHub.
-
-## Credits
-
-Built by Quad Companies using:
-- [laravel-scim-server](https://github.com/limosa-io/laravel-scim-server) by Arie Timmerman
-- [socialite](https://github.com/laravel/socialite) by Laravel
-- [socialiteproviders/authentik](https://github.com/SocialiteProviders/Authentik) by SocialiteProviders
+Built by Quad Companies on [Socialite](https://github.com/laravel/socialite) and [socialiteproviders/authentik](https://github.com/SocialiteProviders/Authentik).

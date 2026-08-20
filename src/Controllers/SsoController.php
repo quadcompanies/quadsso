@@ -14,6 +14,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 use Laravel\Socialite\Facades\Socialite;
 
 class SsoController extends Controller
@@ -73,8 +74,8 @@ class SsoController extends Controller
         $userModel = config('quadsso.user_model', \App\Models\User::class);
         $emailField = config('quadsso.field_mappings.email', 'email');
         $externalIdField = config('quadsso.field_mappings.external_id', 'scim_external_id');
-        $statusField = config('quadsso.scim.user_status_field', 'status');
-        $blockedValue = config('quadsso.scim.blocked_status_value', 'blocked');
+        $statusField = config('quadsso.provisioning.user_status_field', 'status');
+        $blockedValue = config('quadsso.provisioning.blocked_status_value', 'blocked');
 
         // 1. Authoritative lookup: stable IdP subject identifier.
         $user = $userModel::where($externalIdField, $externalId)->first();
@@ -162,36 +163,21 @@ class SsoController extends Controller
             } else {
                 // Create new user with JIT provisioning
                 $verifiedAtField = config('quadsso.field_mappings.email_verified_at', 'email_verified_at');
-                $levelField = config('quadsso.scim.user_level_field', 'level');
+                $levelField = config('quadsso.provisioning.user_level_field', 'level');
 
                 $userData = [
                     $emailField       => $email,
                     $externalIdField  => $externalId,
-                    $statusField      => config('quadsso.scim.default_user_status', 'active'),
+                    $statusField      => config('quadsso.provisioning.default_user_status', 'active'),
                     $verifiedAtField  => now(), // Email is verified by IdP
                 ];
 
-                // Add name if available from OAuth provider
-                $name = $socialUser->getName();
-                if ($name) {
-                    $nameFirstField = config('quadsso.field_mappings.name_first');
-                    $nameLastField = config('quadsso.field_mappings.name_last');
-                    $nameField = config('quadsso.field_mappings.name');
-
-                    // If using split name fields, try to parse the name
-                    if ($nameFirstField && $nameLastField) {
-                        $nameParts = explode(' ', $name, 2);
-                        $userData[$nameFirstField] = $nameParts[0] ?? '';
-                        $userData[$nameLastField] = $nameParts[1] ?? '';
-                    } elseif ($nameField) {
-                        // Use single name field
-                        $userData[$nameField] = $name;
-                    }
-                }
+                // Add name if the IdP supplied one
+                $userData = array_merge($userData, $this->nameAttributesFor($socialUser->getName()));
 
                 // Add default user level if the field exists
                 if (Schema::hasColumn((new $userModel)->getTable(), $levelField)) {
-                    $userData[$levelField] = config('quadsso.scim.default_user_level', 'user');
+                    $userData[$levelField] = config('quadsso.provisioning.default_user_level', 'user');
                 }
 
                 try {
@@ -228,8 +214,34 @@ class SsoController extends Controller
             );
         }
 
+        // Fail closed if the status column can't be resolved at all. `$user->$statusField`
+        // is attribute access, not a query: a column name that doesn't exist reads back
+        // as null, null never equals the blocked value, and the block check below would
+        // quietly pass — admitting suspended accounts with no error anywhere.
+        //
+        // Skipped when the application has opted out of status-based blocking
+        // (empty blocked_status_value) or brings its own isBlocked() gate.
+        $statusBlockingExpected = $blockedValue !== null && $blockedValue !== '';
+        $modelHasOwnBlockCheck = method_exists($user, 'isBlocked');
+
+        if ($statusBlockingExpected
+            && !$modelHasOwnBlockCheck
+            && !$this->statusAttributeIsResolvable($user, $statusField)) {
+            Log::error(
+                "QuadSSO: status column [{$statusField}] does not exist on the user model, so blocked "
+                . 'accounts cannot be detected. Refusing login rather than admitting everyone. Point '
+                . 'QUADSSO_USER_STATUS_FIELD at a real column, add it via migration, or set '
+                . 'QUADSSO_BLOCKED_STATUS_VALUE empty to disable status-based blocking.',
+                ['user_id' => $user->getKey()]
+            );
+
+            return $this->redirectAfterFailure(
+                'Your account status could not be verified. Please contact an administrator.'
+            );
+        }
+
         // Block check
-        if ($user->$statusField === $blockedValue || (method_exists($user, 'isBlocked') && $user->isBlocked())) {
+        if ($user->$statusField === $blockedValue || ($modelHasOwnBlockCheck && $user->isBlocked())) {
             if (config('quadsso.logging.sso_events', false)) {
                 Log::warning('QuadSSO: Blocked user attempted SSO login', [
                     'user_id'     => $user->id,
@@ -242,6 +254,11 @@ class SsoController extends Controller
             );
         }
 
+        // Refresh profile attributes from the IdP. Without this, whatever the row
+        // held at creation time is frozen forever — a rename at the IdP never
+        // reaches the application.
+        $this->syncAttributesFromIdp($user, $socialUser, $idpEmailVerified);
+
         // Mark email as verified on first SSO login. Only do this when the IdP
         // actually claims the email is verified — otherwise we'd be laundering
         // an unverified email through SSO.
@@ -253,7 +270,7 @@ class SsoController extends Controller
             }
         }
 
-        Auth::login($user, remember: true);
+        Auth::login($user, remember: (bool) config('quadsso.sso.remember_login', false));
 
         if (config('quadsso.logging.sso_events', false)) {
             Log::info('QuadSSO: User logged in via SSO', [
@@ -264,6 +281,137 @@ class SsoController extends Controller
 
         $redirectTo = config('quadsso.sso.redirect_after_login', '/home');
         return redirect($redirectTo);
+    }
+
+    /**
+     * Can the configured status attribute actually be read off this model?
+     *
+     * Checks the loaded row attributes first, then the two accessor styles, so a
+     * status derived in PHP rather than stored in a column is still recognised.
+     * Deliberately avoids Schema::hasColumn() — that is a database round trip on
+     * every login to answer a question the loaded model already knows.
+     */
+    private function statusAttributeIsResolvable($user, string $statusField): bool
+    {
+        if (array_key_exists($statusField, $user->getAttributes())) {
+            return true;
+        }
+
+        // Classic accessor: getStatusAttribute()
+        if (method_exists($user, 'get' . Str::studly($statusField) . 'Attribute')) {
+            return true;
+        }
+
+        // Attribute-class accessor (Laravel 9+): protected function status(): Attribute
+        if (method_exists($user, Str::camel($statusField))) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Build the name column(s) for a display name supplied by the IdP.
+     *
+     * Which columns come back depends on field_mappings: either the split
+     * name_first/name_last pair, or Laravel's single `name` column. Returns an
+     * empty array when the IdP sent no name or no name mapping is configured.
+     */
+    private function nameAttributesFor(?string $name): array
+    {
+        if (!$name) {
+            return [];
+        }
+
+        $nameFirstField = config('quadsso.field_mappings.name_first');
+        $nameLastField  = config('quadsso.field_mappings.name_last');
+        $nameField      = config('quadsso.field_mappings.name');
+
+        if ($nameFirstField && $nameLastField) {
+            $parts = explode(' ', $name, 2);
+
+            return [
+                $nameFirstField => $parts[0] ?? '',
+                $nameLastField  => $parts[1] ?? '',
+            ];
+        }
+
+        if ($nameField) {
+            return [$nameField => $name];
+        }
+
+        return [];
+    }
+
+    /**
+     * Copy profile attributes from the IdP onto an already-resolved user.
+     *
+     * Identity is pinned to `sub` before this runs, so following an email
+     * change at the IdP is safe — email is an attribute here, never a lookup
+     * key. Two guards still apply: the IdP must assert the address is verified,
+     * and the address must not already belong to another local row (the column
+     * is typically unique, so writing a duplicate would throw).
+     */
+    private function syncAttributesFromIdp($user, $socialUser, bool $idpEmailVerified): void
+    {
+        if (!config('quadsso.sso.sync_attributes_on_login', true)) {
+            return;
+        }
+
+        $changes = $this->nameAttributesFor($socialUser->getName());
+
+        $emailField = config('quadsso.field_mappings.email', 'email');
+        $email = $socialUser->getEmail();
+
+        if ($email && $idpEmailVerified && $user->{$emailField} !== $email) {
+            $userModel = config('quadsso.user_model', \App\Models\User::class);
+
+            $taken = $userModel::where($emailField, $email)
+                ->whereKeyNot($user->getKey())
+                ->exists();
+
+            if ($taken) {
+                Log::warning('QuadSSO: skipping email sync, address already used by another local user', [
+                    'user_id' => $user->id,
+                ]);
+            } else {
+                $changes[$emailField] = $email;
+            }
+        }
+
+        // Only write columns that actually differ. Empty values are skipped so a
+        // single-word display name can't blank out an existing surname.
+        $dirty = [];
+        foreach ($changes as $column => $value) {
+            if ($value !== null && $value !== '' && $user->{$column} !== $value) {
+                $dirty[$column] = $value;
+            }
+        }
+
+        if (!$dirty) {
+            return;
+        }
+
+        foreach ($dirty as $column => $value) {
+            $user->{$column} = $value;
+        }
+
+        try {
+            $user->save();
+
+            if (config('quadsso.logging.sso_events', false)) {
+                Log::info('QuadSSO: synced attributes from IdP', [
+                    'user_id' => $user->id,
+                    'columns' => array_keys($dirty),
+                ]);
+            }
+        } catch (\Exception $e) {
+            // A stale local row is better than a failed login.
+            Log::error('QuadSSO: attribute sync failed', [
+                'user_id' => $user->id,
+                'error'   => $e->getMessage(),
+            ]);
+        }
     }
 
     /**
