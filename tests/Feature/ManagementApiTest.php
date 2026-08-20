@@ -153,6 +153,56 @@ class ManagementApiTest extends TestCase
     }
 
     // ---------------------------------------------------------------------
+    // Logging
+    // ---------------------------------------------------------------------
+
+    public function test_hits_are_traced_when_logging_is_enabled(): void
+    {
+        config(['quadsso.logging.enabled' => true]);
+
+        $user = $this->makeUser();
+
+        \Illuminate\Support\Facades\Log::spy();
+        $this->manage(['action' => 'SUSPEND', 'email' => $user->email])->assertOk();
+
+        foreach (['management API hit', 'request authorised', 'action authorised', 'completed SUSPEND'] as $step) {
+            \Illuminate\Support\Facades\Log::shouldHaveReceived('info')
+                ->withArgs(fn(string $m) => str_contains($m, $step))
+                ->once();
+        }
+    }
+
+    public function test_hits_are_not_traced_when_logging_is_off(): void
+    {
+        config(['quadsso.logging.enabled' => false, 'quadsso.logging.api_events' => false]);
+
+        $user = $this->makeUser();
+
+        \Illuminate\Support\Facades\Log::spy();
+        $this->manage(['action' => 'SUSPEND', 'email' => $user->email])->assertOk();
+
+        \Illuminate\Support\Facades\Log::shouldNotHaveReceived('info');
+    }
+
+    /**
+     * An unauthorised attempt on a destructive endpoint is recorded whether or
+     * not anyone remembered to turn the trace on.
+     */
+    public function test_a_rejected_key_is_logged_even_with_logging_off(): void
+    {
+        config(['quadsso.logging.enabled' => false, 'quadsso.logging.api_events' => false]);
+
+        $user = $this->makeUser();
+
+        \Illuminate\Support\Facades\Log::spy();
+        $this->manage(['action' => 'DELETE', 'email' => $user->email], key: 'wrong')->assertStatus(401);
+
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('warning')
+            ->withArgs(fn(string $m) => str_contains($m, 'rejected a request'))
+            ->once();
+    }
+
+    // ---------------------------------------------------------------------
     // Validation
     // ---------------------------------------------------------------------
 

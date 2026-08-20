@@ -328,6 +328,65 @@ The `before` hook sees the account as it was; the `after` hook sees it changed. 
 
 ---
 
+## Logging
+
+```env
+QUADSSO_LOGGING=true
+```
+
+That switches on an info-level trace of what the package is doing: login started, callback received, which route resolved the identity, authorization allowed or refused, attributes synced, SLO token verified, management API hit and action completed.
+
+```
+[2026-08-20 09:14:22] production.INFO: QuadSSO: callback received from the identity provider {"external_id":"8f3c...","email":"ada@example.com","email_verified":true}
+[2026-08-20 09:14:22] production.INFO: QuadSSO: identity resolved by external_id {"user_id":42,"external_id":"8f3c..."}
+[2026-08-20 09:14:22] production.INFO: QuadSSO: login authorised, session established {"user_id":42,"external_id":"8f3c..."}
+```
+
+Every message is prefixed `QuadSSO:` so the whole stream is one `grep` away.
+
+### Refusals are logged whether or not the trace is on
+
+Warnings and errors — refused logins, rejected API keys, failed token verification, missing columns — are **always written**, regardless of `QUADSSO_LOGGING`. A security decision that is only visible when debug logging happened to be enabled cannot be audited afterwards, and the moment you need to answer "why couldn't they sign in" is exactly the moment nobody had the flag turned on.
+
+So a quiet log means nothing was refused, not that nothing was watched.
+
+### The trace records personal data
+
+It logs email addresses and IdP subject identifiers, because those are what you need to trace a specific person's login. Treat the output with the same care as the users table: keep it out of third-party log aggregators you would not put user records into, and keep retention short. That is why it is off by default.
+
+### Routing it somewhere of its own
+
+```env
+QUADSSO_LOG_CHANNEL=quadsso
+```
+
+Define the channel in `config/logging.php` first. This keeps the trace out of your application log and lets you give it its own retention:
+
+```php
+'quadsso' => [
+    'driver' => 'daily',
+    'path' => storage_path('logs/quadsso.log'),
+    'level' => 'debug',
+    'days' => 14,
+],
+```
+
+Leave it unset to use the application default channel.
+
+### One category at a time
+
+`QUADSSO_LOGGING=true` turns on everything. For a narrower stream, leave it off and switch on individual categories:
+
+| Variable | Default | Covers |
+|---|---|---|
+| `QUADSSO_LOG_SSO_EVENTS` | `false` | Login redirect, callback, identity resolution, attribute sync, blocked local-auth routes |
+| `QUADSSO_LOG_SLO_EVENTS` | `true` | Back-channel logout: request received, token verified, sessions invalidated |
+| `QUADSSO_LOG_API_EVENTS` | `false` | Management API hits, authorization, actions, lifecycle hooks |
+
+The master switch wins: with `QUADSSO_LOGGING=true`, a category set to `false` is still logged.
+
+---
+
 ## Environment variables
 
 ### Required
@@ -404,8 +463,11 @@ Every value below is the package default; set the variable only to change it.
 |---|---|---|
 | `QUADSSO_USER_MODEL` | `App\Models\User` | Custom user model. |
 | `QUADSSO_BUTTON_LABEL` | `Login via SSO` | Default label for the login button component. |
-| `QUADSSO_LOG_SSO_EVENTS` | `false` | Log login redirect/callback detail. |
-| `QUADSSO_LOG_SLO_EVENTS` | `true` | Log back-channel logout detail. |
+| `QUADSSO_LOGGING` | `false` | Master switch for the info-level trace — see [Logging](#logging). Refusals are logged regardless. |
+| `QUADSSO_LOG_CHANNEL` | — | Route the trace to a dedicated log channel. |
+| `QUADSSO_LOG_SSO_EVENTS` | `false` | Trace login redirect, callback, and identity resolution. |
+| `QUADSSO_LOG_SLO_EVENTS` | `true` | Trace back-channel logout. |
+| `QUADSSO_LOG_API_EVENTS` | `false` | Trace management API hits and actions. |
 
 ---
 
@@ -681,8 +743,7 @@ No data migration is required. The `scim_external_id` column keeps its name.
 Enable verbose logging, then check `storage/logs/laravel.log`:
 
 ```env
-QUADSSO_LOG_SSO_EVENTS=true
-QUADSSO_LOG_SLO_EVENTS=true
+QUADSSO_LOGGING=true
 ```
 
 | Symptom | Cause |
@@ -727,6 +788,7 @@ The suite runs against Testbench with an in-memory SQLite database. It is writte
 | `IdentityResolutionTest` | Who is allowed to become which local row — sub-over-email precedence, one-time binding, JIT gating, blocked users |
 | `SloTokenTest` | Logout tokens are the endpoint's only access control: forged keys, `alg: none`, RS→HS confusion, foreign issuer, wrong audience, replay |
 | `ConfigInjectionTest` | IdP-supplied values stay data; config-supplied column names fail closed |
+| `LoggingTest` | The trace is opt-in, refusals are not, and channel routing works |
 | `SchemaValidationTest` | The boot-time warning covers every config key that names a column, not just `field_mappings` |
 | `RouteGuardTest` | The middleware stack on each route, including that SLO stays outside `web` |
 | `ManagementApiTest` / `Disabled` / `Throttle` | Key enforcement, action semantics, hook ordering and veto, and that the route does not exist while disabled |

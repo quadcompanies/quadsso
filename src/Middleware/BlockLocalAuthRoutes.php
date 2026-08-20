@@ -4,7 +4,7 @@ namespace QuadCompanies\QuadSSO\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Log;
+use QuadCompanies\QuadSSO\Support\QuadSsoLog;
 
 /**
  * Block the host application's local registration and password-reset routes so
@@ -40,12 +40,11 @@ class BlockLocalAuthRoutes
             return $next($request);
         }
 
-        if (config('quadsso.logging.sso_events', false)) {
-            Log::debug('QuadSSO: blocked local auth route', [
-                'route' => $request->route()?->getName(),
-                'path'  => $request->path(),
-            ]);
-        }
+        QuadSsoLog::trace(QuadSsoLog::SSO, 'blocked a local authentication route', [
+            'route' => $request->route()?->getName(),
+            'path'  => $request->path(),
+            'ip'    => $request->ip(),
+        ]);
 
         return $this->deny($request);
     }

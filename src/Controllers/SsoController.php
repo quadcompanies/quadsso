@@ -12,10 +12,10 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Laravel\Socialite\Facades\Socialite;
+use QuadCompanies\QuadSSO\Support\QuadSsoLog;
 
 class SsoController extends Controller
 {
@@ -24,9 +24,7 @@ class SsoController extends Controller
      */
     public function redirect(): RedirectResponse
     {
-        if (config('quadsso.logging.sso_events', false)) {
-            Log::debug('QuadSSO: Redirecting to Authentik for SSO');
-        }
+        QuadSsoLog::trace(QuadSsoLog::SSO, 'login started, redirecting to the identity provider');
 
         return Socialite::driver('authentik')->redirect();
     }
@@ -49,7 +47,7 @@ class SsoController extends Controller
         try {
             $socialUser = Socialite::driver('authentik')->user();
         } catch (\Exception $e) {
-            Log::error('QuadSSO: Authentik callback failed', [
+            QuadSsoLog::error('identity provider handshake failed', [
                 'error' => $e->getMessage(),
             ]);
 
@@ -63,7 +61,7 @@ class SsoController extends Controller
         $idpEmailVerified = (bool) data_get($socialUser->user, 'email_verified', false);
 
         if (!$externalId) {
-            Log::warning('QuadSSO: IdP did not return a sub claim — refusing login', [
+            QuadSsoLog::warning('login refused: the identity provider returned no sub claim', [
                 'email' => $email,
             ]);
             return $this->redirectAfterFailure(
@@ -77,14 +75,27 @@ class SsoController extends Controller
         $statusField = config('quadsso.provisioning.user_status_field', 'status');
         $blockedValue = config('quadsso.provisioning.blocked_status_value', 'blocked');
 
+        QuadSsoLog::trace(QuadSsoLog::SSO, 'callback received from the identity provider', [
+            'external_id'    => $externalId,
+            'email'          => $email,
+            'email_verified' => $idpEmailVerified,
+        ]);
+
         // 1. Authoritative lookup: stable IdP subject identifier.
         $user = $userModel::where($externalIdField, $externalId)->first();
+
+        if ($user) {
+            QuadSsoLog::trace(QuadSsoLog::SSO, 'identity resolved by external_id', [
+                'user_id'     => $user->id,
+                'external_id' => $externalId,
+            ]);
+        }
 
         // 2. Legacy bootstrap (opt-in, single-use): bind the sub onto a row that
         //    matches by email and has no external_id yet. Requires email_verified.
         if (!$user && config('quadsso.sso.allow_legacy_email_binding', false) && $email) {
             if (!$idpEmailVerified) {
-                Log::warning('QuadSSO: refusing legacy email binding (email_verified=false)', [
+                QuadSsoLog::warning('login refused: legacy email binding requires a verified email', [
                     'email'       => $email,
                     'external_id' => $externalId,
                 ]);
@@ -101,20 +112,18 @@ class SsoController extends Controller
                 $user->{$externalIdField} = $externalId;
                 $user->save();
 
-                if (config('quadsso.logging.sso_events', false)) {
-                    Log::info('QuadSSO: bound external_id onto legacy user', [
-                        'user_id'     => $user->id,
-                        'email'       => $email,
-                        'external_id' => $externalId,
-                    ]);
-                }
+                QuadSsoLog::trace(QuadSsoLog::SSO, 'identity resolved by legacy email binding, external_id now bound', [
+                    'user_id'     => $user->id,
+                    'email'       => $email,
+                    'external_id' => $externalId,
+                ]);
             }
         }
 
         // 3. Just-In-Time (JIT) provisioning: create user on first login if enabled
         if (!$user && config('quadsso.sso.enable_jit_provisioning', false)) {
             if (!$email) {
-                Log::warning('QuadSSO JIT: cannot provision user without email', [
+                QuadSsoLog::warning('JIT provisioning refused: the identity provider returned no email', [
                     'external_id' => $externalId,
                 ]);
                 return $this->redirectAfterFailure(
@@ -124,7 +133,7 @@ class SsoController extends Controller
 
             // Require email_verified from IdP for JIT provisioning (same security posture as legacy binding)
             if (!$idpEmailVerified) {
-                Log::warning('QuadSSO JIT: refusing provisioning (email_verified=false)', [
+                QuadSsoLog::warning('JIT provisioning refused: email is not verified by the identity provider', [
                     'email'       => $email,
                     'external_id' => $externalId,
                 ]);
@@ -136,7 +145,7 @@ class SsoController extends Controller
             // Check if a user with this email already exists (with a different external_id)
             $existingUser = $userModel::where($emailField, $email)->first();
             if ($existingUser && $existingUser->{$externalIdField}) {
-                Log::warning('QuadSSO JIT: email collision with existing user', [
+                QuadSsoLog::warning('JIT provisioning refused: email already belongs to another identity', [
                     'email'                => $email,
                     'incoming_external_id' => $externalId,
                     'existing_external_id' => $existingUser->{$externalIdField},
@@ -153,13 +162,11 @@ class SsoController extends Controller
 
                 $user = $existingUser;
 
-                if (config('quadsso.logging.sso_events', false)) {
-                    Log::info('QuadSSO JIT: bound external_id to existing user', [
-                        'user_id'     => $user->id,
-                        'email'       => $email,
-                        'external_id' => $externalId,
-                    ]);
-                }
+                QuadSsoLog::trace(QuadSsoLog::SSO, 'JIT bound external_id to an existing unbound user', [
+                    'user_id'     => $user->id,
+                    'email'       => $email,
+                    'external_id' => $externalId,
+                ]);
             } else {
                 // Create new user with JIT provisioning
                 $verifiedAtField = config('quadsso.field_mappings.email_verified_at', 'email_verified_at');
@@ -183,13 +190,13 @@ class SsoController extends Controller
                 try {
                     $user = $userModel::create($userData);
 
-                    Log::info('QuadSSO JIT: created new user', [
+                    QuadSsoLog::trace(QuadSsoLog::SSO, 'JIT provisioned a new user', [
                         'user_id'     => $user->id,
                         'email'       => $email,
                         'external_id' => $externalId,
                     ]);
                 } catch (\Exception $e) {
-                    Log::error('QuadSSO JIT: failed to create user', [
+                    QuadSsoLog::error('JIT provisioning failed while creating the user', [
                         'email'       => $email,
                         'external_id' => $externalId,
                         'error'       => $e->getMessage(),
@@ -202,12 +209,10 @@ class SsoController extends Controller
         }
 
         if (!$user) {
-            if (config('quadsso.logging.sso_events', false)) {
-                Log::warning('QuadSSO: No user found for SSO callback', [
-                    'email'       => $email,
-                    'external_id' => $externalId,
-                ]);
-            }
+            QuadSsoLog::warning('login refused: no local account matches this identity', [
+                'email'       => $email,
+                'external_id' => $externalId,
+            ]);
 
             return $this->redirectAfterFailure(
                 'No account found for this identity. Please contact an administrator.'
@@ -227,8 +232,8 @@ class SsoController extends Controller
         if ($statusBlockingExpected
             && !$modelHasOwnBlockCheck
             && !$this->statusAttributeIsResolvable($user, $statusField)) {
-            Log::error(
-                "QuadSSO: status column [{$statusField}] does not exist on the user model, so blocked "
+            QuadSsoLog::error(
+                "status column [{$statusField}] does not exist on the user model, so blocked "
                 . 'accounts cannot be detected. Refusing login rather than admitting everyone. Point '
                 . 'QUADSSO_USER_STATUS_FIELD at a real column, add it via migration, or set '
                 . 'QUADSSO_BLOCKED_STATUS_VALUE empty to disable status-based blocking.',
@@ -242,12 +247,10 @@ class SsoController extends Controller
 
         // Block check
         if ($user->$statusField === $blockedValue || ($modelHasOwnBlockCheck && $user->isBlocked())) {
-            if (config('quadsso.logging.sso_events', false)) {
-                Log::warning('QuadSSO: Blocked user attempted SSO login', [
-                    'user_id'     => $user->id,
-                    'external_id' => $externalId,
-                ]);
-            }
+            QuadSsoLog::warning('login refused: account is blocked', [
+                'user_id'     => $user->id,
+                'external_id' => $externalId,
+            ]);
 
             return $this->redirectAfterFailure(
                 'Your account has been suspended. Please contact an administrator.'
@@ -272,12 +275,10 @@ class SsoController extends Controller
 
         Auth::login($user, remember: (bool) config('quadsso.sso.remember_login', false));
 
-        if (config('quadsso.logging.sso_events', false)) {
-            Log::info('QuadSSO: User logged in via SSO', [
-                'user_id'     => $user->id,
-                'external_id' => $externalId,
-            ]);
-        }
+        QuadSsoLog::trace(QuadSsoLog::SSO, 'login authorised, session established', [
+            'user_id'     => $user->id,
+            'external_id' => $externalId,
+        ]);
 
         $redirectTo = config('quadsso.sso.redirect_after_login', '/home');
         return redirect($redirectTo);
@@ -371,7 +372,7 @@ class SsoController extends Controller
                 ->exists();
 
             if ($taken) {
-                Log::warning('QuadSSO: skipping email sync, address already used by another local user', [
+                QuadSsoLog::warning('skipping email sync, address already used by another local user', [
                     'user_id' => $user->id,
                 ]);
             } else {
@@ -399,15 +400,13 @@ class SsoController extends Controller
         try {
             $user->save();
 
-            if (config('quadsso.logging.sso_events', false)) {
-                Log::info('QuadSSO: synced attributes from IdP', [
-                    'user_id' => $user->id,
-                    'columns' => array_keys($dirty),
-                ]);
-            }
+            QuadSsoLog::trace(QuadSsoLog::SSO, 'refreshed profile attributes from the identity provider', [
+                'user_id' => $user->id,
+                'columns' => array_keys($dirty),
+            ]);
         } catch (\Exception $e) {
             // A stale local row is better than a failed login.
-            Log::error('QuadSSO: attribute sync failed', [
+            QuadSsoLog::error('attribute sync failed', [
                 'user_id' => $user->id,
                 'error'   => $e->getMessage(),
             ]);
@@ -439,21 +438,19 @@ class SsoController extends Controller
     public function slo(Request $request): Response
     {
         if (!config('quadsso.sso.enable_slo', true)) {
-            Log::warning('QuadSSO SLO: Single Logout is disabled');
+            QuadSsoLog::warning('SLO refused: Single Logout is disabled');
             return response('Single Logout is disabled', 403);
         }
 
-        if (config('quadsso.logging.slo_events', true)) {
-            Log::debug('QuadSSO SLO: incoming request', [
-                'ip'        => $request->ip(),
-                'has_token' => $request->has('logout_token'),
-            ]);
-        }
+        QuadSsoLog::trace(QuadSsoLog::SLO, 'SLO request received', [
+            'ip'        => $request->ip(),
+            'has_token' => $request->has('logout_token'),
+        ]);
 
         $logoutToken = $request->input('logout_token');
 
         if (!$logoutToken) {
-            Log::warning('QuadSSO SLO: missing logout_token');
+            QuadSsoLog::warning('SLO refused: no logout_token supplied');
             return response('Missing logout_token', 400);
         }
 
@@ -461,7 +458,7 @@ class SsoController extends Controller
             $keySet = $this->fetchJwks();
             $payload = JWT::decode($logoutToken, $keySet);
         } catch (\Exception $e) {
-            Log::warning('QuadSSO SLO: token verification failed', ['error' => $e->getMessage()]);
+            QuadSsoLog::warning('SLO refused: token signature verification failed', ['error' => $e->getMessage()]);
             return response('Invalid token', 400);
         }
 
@@ -470,7 +467,7 @@ class SsoController extends Controller
         $expectedIssuerPrefix = rtrim((string) config('quadsso.authentik.base_url'), '/');
         $iss = (string) ($payload->iss ?? '');
         if ($expectedIssuerPrefix === '' || !str_starts_with($iss, $expectedIssuerPrefix)) {
-            Log::warning('QuadSSO SLO: bad issuer', ['iss' => $iss]);
+            QuadSsoLog::warning('SLO refused: token issuer does not match the configured provider', ['iss' => $iss]);
             return response('Invalid token', 400);
         }
 
@@ -480,14 +477,14 @@ class SsoController extends Controller
         $aud = $payload->aud ?? null;
         $audList = is_array($aud) ? $aud : [$aud];
         if ($expectedAudience === '' || !in_array($expectedAudience, $audList, true)) {
-            Log::warning('QuadSSO SLO: bad audience', ['aud' => $aud]);
+            QuadSsoLog::warning('SLO refused: token was minted for a different client', ['aud' => $aud]);
             return response('Invalid token', 400);
         }
 
         // The back-channel-logout event claim must be present per OIDC spec.
         $events = (array) ($payload->events ?? []);
         if (!array_key_exists('http://schemas.openid.net/event/backchannel-logout', $events)) {
-            Log::warning('QuadSSO SLO: logout_token missing backchannel-logout event claim');
+            QuadSsoLog::warning('SLO refused: token is missing the backchannel-logout event claim');
             return response('Invalid token', 400);
         }
 
@@ -495,24 +492,28 @@ class SsoController extends Controller
         // an intercepted/leaked logout_token can't be replayed indefinitely.
         $jti = $payload->jti ?? null;
         if (!$jti) {
-            Log::warning('QuadSSO SLO: logout_token missing jti claim');
+            QuadSsoLog::warning('SLO refused: token is missing its jti claim');
             return response('Invalid token', 400);
         }
         $jtiCacheKey = 'quadsso_slo_jti:' . hash('sha256', (string) $jti);
         if (!Cache::add($jtiCacheKey, 1, now()->addMinutes(15))) {
-            Log::warning('QuadSSO SLO: replayed jti', ['jti' => $jti]);
+            QuadSsoLog::warning('SLO refused: token replayed', ['jti' => $jti]);
             return response('Invalid token', 400);
         }
 
         $externalId = $payload->sub ?? null;
 
         if (!$externalId) {
-            Log::warning('QuadSSO SLO: logout_token missing sub claim');
+            QuadSsoLog::warning('SLO refused: token is missing its sub claim');
             return response('Invalid token', 400);
         }
 
         $userModel = config('quadsso.user_model', \App\Models\User::class);
         $externalIdField = config('quadsso.field_mappings.external_id', 'scim_external_id');
+
+        QuadSsoLog::trace(QuadSsoLog::SLO, 'SLO token verified: signature, issuer, audience, event claim and jti all passed', [
+            'external_id' => $externalId,
+        ]);
 
         $user = $userModel::where($externalIdField, $externalId)->first();
 
@@ -525,14 +526,14 @@ class SsoController extends Controller
                 $user->save();
             }
 
-            Log::info('QuadSSO SLO: sessions invalidated', [
+            QuadSsoLog::trace(QuadSsoLog::SLO, 'SLO accepted, sessions invalidated', [
                 'user_id'     => $user->id,
                 'external_id' => $externalId,
                 'sessions'    => $deleted,
             ]);
         } else {
             // User not found — could be a user that was never synced; log and accept.
-            Log::info('QuadSSO SLO: no local user found for external_id', ['external_id' => $externalId]);
+            QuadSsoLog::trace(QuadSsoLog::SLO, 'SLO accepted, but no local user matches that identity', ['external_id' => $externalId]);
         }
 
         return response('', 200);

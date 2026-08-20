@@ -5,7 +5,7 @@ namespace QuadCompanies\QuadSSO;
 use Illuminate\Support\Facades\Blade;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Log;
+use QuadCompanies\QuadSSO\Support\QuadSsoLog;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
@@ -207,8 +207,8 @@ class QuadSSOServiceProvider extends ServiceProvider
                 ->map(fn($item) => "'{$item['column']}' (mapped from '{$item['sso_field']}')")
                 ->join(', ');
 
-            Log::warning(
-                "QuadSSO: Missing database columns in 'users' table: $columnList. " .
+            QuadSsoLog::warning(
+                "Missing database columns in 'users' table: $columnList. " .
                 "User provisioning may fail, and a missing status column means blocked " .
                 "accounts cannot be detected — logins are refused rather than admitted. " .
                 "Either add these columns via migration, or point the config at columns " .

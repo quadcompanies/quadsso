@@ -4,7 +4,7 @@ namespace QuadCompanies\QuadSSO\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Log;
+use QuadCompanies\QuadSSO\Support\QuadSsoLog;
 
 /**
  * Shared-secret guard for the management API.
@@ -16,10 +16,17 @@ class ManagementApiKey
 {
     public function handle(Request $request, Closure $next): mixed
     {
+        QuadSsoLog::trace(QuadSsoLog::API, 'management API hit', [
+            'ip'     => $request->ip(),
+            'path'   => $request->path(),
+            'method' => $request->method(),
+            'agent'  => $request->userAgent(),
+        ]);
+
         $expected = (string) config('quadsso.management.api_key', '');
 
         if ($expected === '') {
-            Log::error('QuadSSO management API: no api_key configured, refusing all requests');
+            QuadSsoLog::error('management API refusing all requests: no api_key configured');
 
             return $this->error('Management API key is not configured.', 503);
         }
@@ -34,13 +41,18 @@ class ManagementApiKey
         }
 
         if ($provided === '' || !hash_equals($expected, $provided)) {
-            Log::warning('QuadSSO management API: rejected request', [
-                'ip'   => $request->ip(),
-                'path' => $request->path(),
+            QuadSsoLog::warning('management API rejected a request: invalid or missing key', [
+                'ip'    => $request->ip(),
+                'path'  => $request->path(),
+                'agent' => $request->userAgent(),
             ]);
 
             return $this->error('Unauthorized.', 401);
         }
+
+        QuadSsoLog::trace(QuadSsoLog::API, 'management API request authorised', [
+            'ip' => $request->ip(),
+        ]);
 
         return $next($request);
     }

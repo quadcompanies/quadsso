@@ -7,11 +7,12 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Log;
+
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use QuadCompanies\QuadSSO\Contracts\UserLifecycleHooks;
 use QuadCompanies\QuadSSO\Support\NullUserLifecycleHooks;
+use QuadCompanies\QuadSSO\Support\QuadSsoLog;
 
 /**
  * Out-of-band account management for callers that hold the management API key.
@@ -59,12 +60,18 @@ class ManagementController extends Controller
         try {
             $hooks = $this->resolveHooks();
         } catch (\Throwable $e) {
-            Log::error('QuadSSO management API: hooks class could not be resolved', [
+            QuadSsoLog::error('management API aborted: lifecycle hooks class could not be resolved', [
                 'error' => $e->getMessage(),
             ]);
 
             return $this->error('Configured lifecycle hooks could not be resolved.', 500);
         }
+
+        QuadSsoLog::trace(QuadSsoLog::API, 'management API action authorised', [
+            'action'  => $action,
+            'user_id' => $user->getKey(),
+            'hooks'   => $hooks instanceof NullUserLifecycleHooks ? null : get_class($hooks),
+        ]);
 
         return $action === self::ACTION_SUSPEND
             ? $this->suspend($user, $hooks)
@@ -86,7 +93,7 @@ class ManagementController extends Controller
 
         $postHookFailed = $this->runAfter(fn() => $hooks->afterSuspend($user), 'afterSuspend', $user);
 
-        Log::info('QuadSSO management API: user suspended', [
+        QuadSsoLog::trace(QuadSsoLog::API, 'management API completed SUSPEND', [
             'user_id'  => $user->getKey(),
             'sessions' => $sessions,
         ]);
@@ -123,7 +130,7 @@ class ManagementController extends Controller
 
         $postHookFailed = $this->runAfter(fn() => $hooks->afterDelete($user), 'afterDelete', $user);
 
-        Log::info('QuadSSO management API: user deleted', [
+        QuadSsoLog::trace(QuadSsoLog::API, 'management API completed DELETE', [
             'user_id'  => $userId,
             'sessions' => $sessions,
         ]);
@@ -146,7 +153,7 @@ class ManagementController extends Controller
         try {
             $deleted = DB::table('sessions')->where('user_id', $user->getKey())->delete();
         } catch (\Throwable $e) {
-            Log::warning('QuadSSO management API: could not clear sessions table', [
+            QuadSsoLog::warning('management API could not clear the sessions table', [
                 'user_id' => $user->getKey(),
                 'error'   => $e->getMessage(),
             ]);
@@ -179,9 +186,14 @@ class ManagementController extends Controller
         try {
             $hook();
 
+            QuadSsoLog::trace(QuadSsoLog::API, 'lifecycle hook completed', [
+                'hook'    => $name,
+                'user_id' => $user->getKey(),
+            ]);
+
             return null;
         } catch (\Throwable $e) {
-            Log::warning('QuadSSO management API: operation vetoed by lifecycle hook', [
+            QuadSsoLog::warning('management API operation vetoed by a lifecycle hook', [
                 'hook'    => $name,
                 'user_id' => $user->getKey(),
                 'error'   => $e->getMessage(),
@@ -201,9 +213,14 @@ class ManagementController extends Controller
         try {
             $hook();
 
+            QuadSsoLog::trace(QuadSsoLog::API, 'lifecycle hook completed', [
+                'hook'    => $name,
+                'user_id' => $user->getKey(),
+            ]);
+
             return false;
         } catch (\Throwable $e) {
-            Log::error('QuadSSO management API: post hook failed after the change was committed', [
+            QuadSsoLog::error('management API post hook failed after the change was committed', [
                 'hook'    => $name,
                 'user_id' => $user->getKey(),
                 'error'   => $e->getMessage(),

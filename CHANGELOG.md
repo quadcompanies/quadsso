@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`QUADSSO_LOGGING`**, a master switch for an info-level trace of
+  authentication steps, authorization decisions and API hits, routed through a
+  single `QuadSsoLog` helper and optionally to its own channel
+  (`QUADSSO_LOG_CHANNEL`). Per-category switches remain for narrower streams,
+  with a new `QUADSSO_LOG_API_EVENTS`.
+
+  Refusals and errors are now written **regardless** of any logging flag.
+  Previously a blocked user's login attempt was only recorded when
+  `QUADSSO_LOG_SSO_EVENTS` happened to be on, which meant the security decisions
+  worth auditing were the ones least likely to have been captured. The trace
+  records email addresses and subject identifiers and stays off by default.
+
 - **Management API** (`QUADSSO_MGMT_ENABLED`, default off): `POST /api/quadsso-mgr`
   authenticated by a shared key in a configurable header (or a bearer token),
   accepting `SUSPEND` and `DELETE` for a user identified by email. SUSPEND clears

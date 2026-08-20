@@ -334,8 +334,31 @@ return [
     */
 
     'logging' => [
+        /*
+        | Master switch for the info-level trace: authentication steps,
+        | authorization decisions, API hits. Turns on every category below.
+        |
+        | Default: false. The trace is verbose and records personal data —
+        | email addresses and IdP subject identifiers — so treat these logs
+        | with the same care as the users table and keep retention short.
+        |
+        | Refusals and misconfiguration are logged regardless of this setting.
+        | A security decision you can only see when debug logging happened to
+        | be on is a decision you cannot audit afterwards.
+        */
+        'enabled' => env('QUADSSO_LOGGING', false),
+
+        /*
+        | Optional dedicated channel, so the trace can be routed away from the
+        | application log and given its own retention. Define it in
+        | config/logging.php first. Null uses the application default.
+        */
+        'channel' => env('QUADSSO_LOG_CHANNEL'),
+
+        // Per-category switches, for turning on one stream without the rest.
         'sso_events' => env('QUADSSO_LOG_SSO_EVENTS', false),
         'slo_events' => env('QUADSSO_LOG_SLO_EVENTS', true),
+        'api_events' => env('QUADSSO_LOG_API_EVENTS', false),
     ],
 
 ];
