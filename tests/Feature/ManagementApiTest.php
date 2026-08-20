@@ -297,6 +297,160 @@ class ManagementApiTest extends TestCase
     }
 
     // ---------------------------------------------------------------------
+    // UNSUSPEND
+    // ---------------------------------------------------------------------
+
+    public function test_unsuspend_restores_a_blocked_account(): void
+    {
+        $user = $this->makeUser();
+
+        $this->manage(['action' => 'SUSPEND', 'email' => $user->email])->assertOk();
+        $this->assertSame('blocked', $user->fresh()->status);
+
+        $this->manage(['action' => 'UNSUSPEND', 'email' => $user->email])
+            ->assertOk()
+            ->assertJson(['status' => 'ok', 'action' => 'UNSUSPEND']);
+
+        $this->assertSame('active', $user->fresh()->status);
+    }
+
+    public function test_unsuspend_uses_the_configured_active_value(): void
+    {
+        config(['quadsso.provisioning.active_status_value' => 'enabled']);
+
+        $user = $this->makeUser();
+        $this->manage(['action' => 'SUSPEND', 'email' => $user->email])->assertOk();
+
+        $this->manage(['action' => 'UNSUSPEND', 'email' => $user->email])->assertOk();
+
+        $this->assertSame('enabled', $user->fresh()->status);
+    }
+
+    /**
+     * The value new accounts get and the value a restored account gets are
+     * different settings, because they differ whenever registration starts
+     * users in a pending state.
+     */
+    public function test_unsuspend_does_not_use_the_default_new_user_status(): void
+    {
+        config([
+            'quadsso.provisioning.active_status_value' => 'active',
+            'quadsso.provisioning.default_user_status' => 'pending',
+        ]);
+
+        $user = $this->makeUser();
+        $this->manage(['action' => 'SUSPEND', 'email' => $user->email])->assertOk();
+
+        $this->manage(['action' => 'UNSUSPEND', 'email' => $user->email])->assertOk();
+
+        $this->assertSame('active', $user->fresh()->status, 'a restored user must not be demoted to pending');
+    }
+
+    /**
+     * Sessions were destroyed, not parked. Unsuspending cannot bring them back
+     * and must not pretend otherwise.
+     */
+    public function test_unsuspend_does_not_restore_sessions(): void
+    {
+        $user = $this->makeUser();
+
+        $this->manage(['action' => 'SUSPEND', 'email' => $user->email])->assertOk();
+        $this->manage(['action' => 'UNSUSPEND', 'email' => $user->email])
+            ->assertOk()
+            ->assertJson(['sessions_cleared' => null]);
+
+        $this->assertSame(0, $this->sessionCountFor($user->id));
+    }
+
+    public function test_unsuspend_is_idempotent_on_an_active_account(): void
+    {
+        $user = $this->makeUser();
+
+        $this->manage(['action' => 'UNSUSPEND', 'email' => $user->email])->assertOk();
+
+        $this->assertSame('active', $user->fresh()->status);
+    }
+
+    public function test_unsuspend_only_touches_the_named_user(): void
+    {
+        $target = $this->makeUser('target@example.test');
+        $other = $this->makeUser('other@example.test');
+
+        $this->manage(['action' => 'SUSPEND', 'email' => $target->email])->assertOk();
+        $this->manage(['action' => 'SUSPEND', 'email' => $other->email])->assertOk();
+
+        $this->manage(['action' => 'UNSUSPEND', 'email' => $target->email])->assertOk();
+
+        $this->assertSame('active', $target->fresh()->status);
+        $this->assertSame('blocked', $other->fresh()->status, 'the other user stays suspended');
+    }
+
+    public function test_unsuspend_returns_404_for_a_deleted_user(): void
+    {
+        $user = $this->makeUser();
+
+        $this->manage(['action' => 'DELETE', 'email' => $user->email])->assertOk();
+        $this->manage(['action' => 'UNSUSPEND', 'email' => $user->email])->assertStatus(404);
+    }
+
+    public function test_unsuspend_hooks_run_before_and_after_in_order(): void
+    {
+        $user = $this->makeUser();
+        $this->manage(['action' => 'SUSPEND', 'email' => $user->email])->assertOk();
+
+        config(['quadsso.management.hooks' => RecordingHooks::class]);
+        RecordingHooks::reset();
+
+        $this->manage(['action' => 'UNSUSPEND', 'email' => $user->email])->assertOk();
+
+        $this->assertSame(['beforeUnsuspend', 'afterUnsuspend'], RecordingHooks::$calls);
+        $this->assertSame('blocked', RecordingHooks::$statusAtCall['beforeUnsuspend']);
+        $this->assertSame('active', RecordingHooks::$statusAtCall['afterUnsuspend']);
+    }
+
+    public function test_a_throwing_before_unsuspend_hook_vetoes_the_operation(): void
+    {
+        $user = $this->makeUser();
+        $this->manage(['action' => 'SUSPEND', 'email' => $user->email])->assertOk();
+
+        config(['quadsso.management.hooks' => RecordingHooks::class]);
+        RecordingHooks::reset();
+        RecordingHooks::$throwFrom = ['beforeUnsuspend'];
+
+        $this->manage(['action' => 'UNSUSPEND', 'email' => $user->email])->assertStatus(409);
+
+        $this->assertSame('blocked', $user->fresh()->status, 'the suspension must stand when vetoed');
+        $this->assertNotContains('afterUnsuspend', RecordingHooks::$calls);
+    }
+
+    public function test_unsuspend_does_not_run_suspend_or_delete_hooks(): void
+    {
+        $user = $this->makeUser();
+
+        config(['quadsso.management.hooks' => RecordingHooks::class]);
+        RecordingHooks::reset();
+
+        $this->manage(['action' => 'UNSUSPEND', 'email' => $user->email])->assertOk();
+
+        $this->assertSame(['beforeUnsuspend', 'afterUnsuspend'], RecordingHooks::$calls);
+    }
+
+    /**
+     * Round trip: suspended, restored, and able to authenticate again.
+     */
+    public function test_a_restored_user_is_no_longer_refused_at_login(): void
+    {
+        $user = $this->makeUser();
+        $blocked = config('quadsso.provisioning.blocked_status_value');
+
+        $this->manage(['action' => 'SUSPEND', 'email' => $user->email])->assertOk();
+        $this->assertSame($blocked, $user->fresh()->status);
+
+        $this->manage(['action' => 'UNSUSPEND', 'email' => $user->email])->assertOk();
+        $this->assertNotSame($blocked, $user->fresh()->status);
+    }
+
+    // ---------------------------------------------------------------------
     // DELETE
     // ---------------------------------------------------------------------
 

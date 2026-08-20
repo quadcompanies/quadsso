@@ -66,6 +66,13 @@ return [
         // User model column storing the account status
         'user_status_field' => env('QUADSSO_USER_STATUS_FIELD', 'status'),
 
+        // Status value meaning "may sign in". The management API's UNSUSPEND
+        // restores accounts to this. Kept separate from default_user_status
+        // because the two differ whenever new accounts start life needing
+        // approval — unsuspending an established user should not demote it
+        // back to a pending state.
+        'active_status_value' => env('QUADSSO_ACTIVE_STATUS_VALUE', 'active'),
+
         // Status value that denies login. Within the package only the management
         // API writes it; otherwise set it from your own admin tooling.
         //
@@ -207,8 +214,12 @@ return [
     |   {"action": "SUSPEND", "email": "user@example.com"}
     |   {"action": "DELETE",  "email": "user@example.com"}
     |
+    |   {"action": "UNSUSPEND", "email": "user@example.com"}
+    |
     | SUSPEND clears sessions, cycles the remember token, and sets the status
     | column to blocked_status_value. DELETE does that and then removes the row.
+    | UNSUSPEND restores the status to active_status_value; it cannot restore
+    | sessions, so the user signs in again.
     |
     | The route is not registered at all while this is disabled, so the path
     | 404s rather than advertising itself.

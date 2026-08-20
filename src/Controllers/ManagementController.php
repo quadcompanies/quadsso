@@ -19,8 +19,9 @@ use QuadCompanies\QuadSSO\Support\QuadSsoLog;
  *
  * Two actions, both keyed on email address:
  *
- *   SUSPEND — terminate every session and mark the account blocked
- *   DELETE  — the same, then remove the row
+ *   SUSPEND   — terminate every session and mark the account blocked
+ *   UNSUSPEND — lift the block so the account can sign in again
+ *   DELETE    — SUSPEND, then remove the row
  *
  * Each wraps optional application hooks (see UserLifecycleHooks): a `before`
  * hook that can veto by throwing, and an `after` hook for follow-up work.
@@ -28,6 +29,7 @@ use QuadCompanies\QuadSSO\Support\QuadSsoLog;
 class ManagementController extends Controller
 {
     private const ACTION_SUSPEND = 'SUSPEND';
+    private const ACTION_UNSUSPEND = 'UNSUSPEND';
     private const ACTION_DELETE = 'DELETE';
 
     public function __invoke(Request $request): JsonResponse
@@ -44,8 +46,8 @@ class ManagementController extends Controller
         $action = strtoupper(trim((string) $request->input('action')));
         $email = (string) $request->input('email');
 
-        if (!in_array($action, [self::ACTION_SUSPEND, self::ACTION_DELETE], true)) {
-            return $this->error('Unsupported action. Expected SUSPEND or DELETE.', 422);
+        if (!in_array($action, [self::ACTION_SUSPEND, self::ACTION_UNSUSPEND, self::ACTION_DELETE], true)) {
+            return $this->error('Unsupported action. Expected SUSPEND, UNSUSPEND or DELETE.', 422);
         }
 
         $userModel = config('quadsso.user_model', \App\Models\User::class);
@@ -73,9 +75,11 @@ class ManagementController extends Controller
             'hooks'   => $hooks instanceof NullUserLifecycleHooks ? null : get_class($hooks),
         ]);
 
-        return $action === self::ACTION_SUSPEND
-            ? $this->suspend($user, $hooks)
-            : $this->delete($user, $hooks);
+        return match ($action) {
+            self::ACTION_SUSPEND   => $this->suspend($user, $hooks),
+            self::ACTION_UNSUSPEND => $this->unsuspend($user, $hooks),
+            default                => $this->delete($user, $hooks),
+        };
     }
 
     private function suspend(Model $user, UserLifecycleHooks $hooks): JsonResponse
@@ -99,6 +103,36 @@ class ManagementController extends Controller
         ]);
 
         return $this->ok('SUSPEND', $user, $sessions, $postHookFailed);
+    }
+
+    /**
+     * Lift a suspension.
+     *
+     * Sessions are not restored — they were destroyed, not parked — so the user
+     * signs in again. The remember token stays cycled for the same reason: the
+     * cookies that existed before the suspension are gone for good.
+     */
+    private function unsuspend(Model $user, UserLifecycleHooks $hooks): JsonResponse
+    {
+        if ($veto = $this->runBefore(fn() => $hooks->beforeUnsuspend($user), 'beforeUnsuspend', $user)) {
+            return $veto;
+        }
+
+        DB::transaction(function () use ($user) {
+            $statusField = config('quadsso.provisioning.user_status_field', 'status');
+            $activeValue = config('quadsso.provisioning.active_status_value', 'active');
+
+            $user->{$statusField} = $activeValue;
+            $user->save();
+        });
+
+        $postHookFailed = $this->runAfter(fn() => $hooks->afterUnsuspend($user), 'afterUnsuspend', $user);
+
+        QuadSsoLog::trace(QuadSsoLog::API, 'management API completed UNSUSPEND', [
+            'user_id' => $user->getKey(),
+        ]);
+
+        return $this->ok('UNSUSPEND', $user, null, $postHookFailed);
     }
 
     private function delete(Model $user, UserLifecycleHooks $hooks): JsonResponse

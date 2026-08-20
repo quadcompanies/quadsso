@@ -260,6 +260,7 @@ Content-Type: application/json
 | Action | Effect |
 |---|---|
 | `SUSPEND` | Delete the user's session rows, cycle the remember token, set the status column to the blocked value |
+| `UNSUSPEND` | Set the status column back to the active value, lifting the block |
 | `DELETE` | Everything `SUSPEND` does, then remove the row |
 
 Users are identified by email address. Actions are case-insensitive.
@@ -279,6 +280,8 @@ Users are identified by email address. Actions are case-insensitive.
 | `503` | No API key configured; the endpoint refuses to serve unauthenticated |
 
 Cycling the remember token is part of `SUSPEND`, not an extra: a remember-me cookie outlives session rows, so without it "end the session" wouldn't.
+
+`UNSUSPEND` reverses the block, not the sign-out. Sessions were destroyed rather than parked, so they cannot come back — the user signs in again, and `sessions_cleared` is `null`. It restores the status to `QUADSSO_ACTIVE_STATUS_VALUE`, which is deliberately a separate setting from `QUADSSO_DEFAULT_USER_STATUS`: if new accounts start life as `pending`, restoring an established user to `pending` would be a demotion, not a reinstatement. It is idempotent on an account that is already active, and 404s on one that has been deleted.
 
 `DELETE` uses `forceDelete()` when the model soft-deletes, so the row really leaves the table. Set `QUADSSO_MGMT_FORCE_DELETE=false` to keep soft-delete semantics — the account is marked blocked before deletion either way, so a restored row is still refused at login.
 
@@ -318,7 +321,7 @@ class OffboardingHooks extends NullUserLifecycleHooks
 QUADSSO_MGMT_HOOKS="App\Sso\OffboardingHooks"
 ```
 
-Four hooks: `beforeSuspend`, `afterSuspend`, `beforeDelete`, `afterDelete`.
+Six hooks: `beforeSuspend`, `afterSuspend`, `beforeUnsuspend`, `afterUnsuspend`, `beforeDelete`, `afterDelete`.
 
 **A throwing `before` hook vetoes the operation.** Nothing is written and the API responds `409` carrying your exception message. That is the supported way to protect an account from deletion.
 
@@ -444,6 +447,7 @@ Every value below is the package default; set the variable only to change it.
 | `QUADSSO_DEFAULT_USER_STATUS` | `active` | Value written to the status column on create. |
 | `QUADSSO_USER_LEVEL_FIELD` | `level` | Column storing the user role/level. The level migration creates whatever you name here. |
 | `QUADSSO_USER_STATUS_FIELD` | `status` | Column storing account status. |
+| `QUADSSO_ACTIVE_STATUS_VALUE` | `active` | Status value meaning "may sign in". What `UNSUSPEND` restores to. |
 | `QUADSSO_BLOCKED_STATUS_VALUE` | `blocked` | Status value that denies login. Written by your app, read by this package. |
 
 **Management API** — see [Management API](#management-api)

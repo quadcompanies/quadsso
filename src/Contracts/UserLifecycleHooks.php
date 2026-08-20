@@ -25,6 +25,10 @@ interface UserLifecycleHooks
 
     public function afterSuspend(Model $user): void;
 
+    public function beforeUnsuspend(Model $user): void;
+
+    public function afterUnsuspend(Model $user): void;
+
     public function beforeDelete(Model $user): void;
 
     /**

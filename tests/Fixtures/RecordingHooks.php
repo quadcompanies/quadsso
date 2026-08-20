@@ -51,6 +51,16 @@ class RecordingHooks extends NullUserLifecycleHooks
         $this->record('afterSuspend', $user);
     }
 
+    public function beforeUnsuspend(Model $user): void
+    {
+        $this->record('beforeUnsuspend', $user);
+    }
+
+    public function afterUnsuspend(Model $user): void
+    {
+        $this->record('afterUnsuspend', $user);
+    }
+
     public function beforeDelete(Model $user): void
     {
         $this->record('beforeDelete', $user);

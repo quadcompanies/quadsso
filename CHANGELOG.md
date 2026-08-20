@@ -48,6 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`UNSUSPEND` action** on the management API, lifting a block set by
+  `SUSPEND`. It restores the status column to a reintroduced
+  `QUADSSO_ACTIVE_STATUS_VALUE`, kept separate from `QUADSSO_DEFAULT_USER_STATUS`
+  because the two differ whenever new accounts start life pending approval —
+  restoring an established user to `pending` would be a demotion. Sessions are
+  not restored (they were destroyed, not parked), so the user signs in again.
+  Idempotent on an already-active account; 404 on a deleted one.
+  `UserLifecycleHooks` gains `beforeUnsuspend` and `afterUnsuspend`, which is a
+  breaking change only for anyone implementing the interface directly rather
+  than extending `NullUserLifecycleHooks`.
+
 - **`QUADSSO_LOGGING`**, a master switch for an info-level trace of
   authentication steps, authorization decisions and API hits, routed through a
   single `QuadSsoLog` helper and optionally to its own channel
