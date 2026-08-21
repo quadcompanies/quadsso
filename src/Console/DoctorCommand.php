@@ -31,6 +31,7 @@ class DoctorCommand extends Command
         $this->checkAuthentik();
         $this->checkSchema();
         $this->checkSessions();
+        $this->checkLocalAuth();
         $this->checkManagementApi();
         $this->checkRoutes();
 
@@ -203,6 +204,89 @@ class DoctorCommand extends Command
         $registered = $this->middlewareRegistered(EnforceSessionRevocation::class);
         $this->record('sessions', 'revocation middleware', $registered ? 'PASS' : 'FAIL',
             $registered ? 'active on the web group' : 'not registered on the web group');
+    }
+
+    /**
+     * Whether the host application still exposes its own registration and
+     * password-reset routes.
+     *
+     * Password reset is an SSO bypass: a provisioned user holds a random
+     * password they never knew, but the reset flow will happily let them set
+     * one at their IdP-verified address and sign in locally from then on —
+     * never touching the IdP again, and surviving deactivation there.
+     *
+     * Reported against the real route table rather than the config alone, so
+     * an application that simply has no such routes is not nagged about a
+     * bypass it does not have.
+     */
+    private function checkLocalAuth(): void
+    {
+        $enabled = (bool) config('quadsso.disable_local_auth.enabled', true);
+        $exposed = $this->localAuthRoutes();
+
+        if (!$enabled) {
+            $this->record(
+                'local auth',
+                'lockout',
+                $exposed === [] ? 'PASS' : 'WARN',
+                $exposed === []
+                    ? 'disabled, but no local auth routes are registered'
+                    : 'disabled while ' . count($exposed) . ' route(s) remain reachable, including '
+                        . $exposed[0] . ' — password reset bypasses SSO'
+            );
+
+            return;
+        }
+
+        $this->record('local auth', 'lockout', 'PASS',
+            $exposed === []
+                ? 'enabled; no local auth routes registered'
+                : 'enabled; ' . count($exposed) . ' route(s) blocked');
+
+        $registered = $this->middlewareRegistered(
+            \QuadCompanies\QuadSSO\Middleware\BlockLocalAuthRoutes::class
+        );
+
+        $this->record('local auth', 'lockout middleware', $registered ? 'PASS' : 'FAIL',
+            $registered ? 'active on the web group' : 'not registered on the web group');
+
+        // /login stays reachable on purpose: blocking it removes the only way
+        // back in when the IdP itself is unavailable.
+        $names = (array) config('quadsso.disable_local_auth.route_names', []);
+
+        if (in_array('login', $names, true)) {
+            $this->record('local auth', 'break-glass login', 'WARN',
+                'login is blocked too; there is no way in if the IdP is unavailable');
+        }
+    }
+
+    /**
+     * Host routes the lockout would catch, matched the same way the middleware
+     * matches them: by route name first, then URI pattern.
+     */
+    private function localAuthRoutes(): array
+    {
+        $names = (array) config('quadsso.disable_local_auth.route_names', []);
+        $paths = (array) config('quadsso.disable_local_auth.paths', []);
+        $found = [];
+
+        foreach (Route::getRoutes()->getRoutes() as $route) {
+            $uri = $route->uri();
+
+            if (str_starts_with($uri, 'auth/sso')) {
+                continue;
+            }
+
+            $name = $route->getName();
+            $matches = ($name !== null && in_array($name, $names, true))
+                || ($paths !== [] && \Illuminate\Support\Str::is($paths, $uri));
+
+            if ($matches) {
+                $found[] = $route->methods()[0] . ' /' . $uri;
+            }
+        }
+
+        return $found;
     }
 
     private function checkManagementApi(): void

@@ -14,15 +14,6 @@ use QuadCompanies\QuadSSO\Tests\TestCase;
  */
 class LocalAuthLockoutTest extends TestCase
 {
-    protected function defineEnvironment($app): void
-    {
-        parent::defineEnvironment($app);
-
-        // Read at boot to decide whether to push the middleware, so it has to
-        // be set here rather than inside a test.
-        $app['config']->set('quadsso.disable_local_auth.enabled', true);
-    }
-
     protected function defineRoutes($router): void
     {
         $router->middleware('web')->group(function (Router $router) {
@@ -38,6 +29,16 @@ class LocalAuthLockoutTest extends TestCase
             // No name — only the path patterns can catch this one.
             $router->get('password/legacy-reset', fn() => 'legacy reset');
         });
+    }
+
+    /**
+     * Nothing switches this on: installing the package is the opt-in. A
+     * developer who forgets a flag would otherwise leave the password-reset
+     * bypass open, which is exactly the failure this default exists to prevent.
+     */
+    public function test_the_lockout_is_on_by_default(): void
+    {
+        $this->assertTrue(config('quadsso.disable_local_auth.enabled'));
     }
 
     public function test_blocks_the_registration_form(): void

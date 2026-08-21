@@ -96,6 +96,8 @@ See [Provisioning](#provisioning) — this is the one decision you have to make 
 
 If your app uses Tailwind, add the package's views to your content sources or the button's classes will be purged — see [The login button](#the-login-button).
 
+Note that installing QuadSSO also **blocks your application's registration and password-reset routes** by default, since password reset would otherwise bypass SSO entirely — see [Locking out local authentication](#locking-out-local-authentication).
+
 ---
 
 ## Provisioning
@@ -186,15 +188,19 @@ The SSO callback refuses login when the user's status column holds `QUADSSO_BLOC
 
 ## Locking out local authentication
 
-If your app still has Breeze, Fortify, Jetstream, or Laravel UI scaffolding installed, its registration and password-reset routes remain live alongside SSO. **Password reset is an SSO bypass.** A user provisioned through SSO holds a random, unusable password — but the reset flow will happily send them a link at their IdP-verified address, let them set a password they know, and from then on they authenticate locally. That path never touches Authentik, so it also survives deactivation there.
+**This is on by default.** Installing QuadSSO is a statement that the identity provider owns authentication, so the local routes stop being reachable at that point rather than when somebody remembers to set a flag.
 
-Turn the block on:
+The reason is that **password reset is an SSO bypass**. A user provisioned through SSO holds a random, unusable password — but if your app still has Breeze, Fortify, Jetstream, or Laravel UI scaffolding installed, the reset flow will send them a link at their IdP-verified address, let them set a password they know, and from then on they authenticate locally. That path never touches Authentik, so it also survives deactivation there.
+
+The package pushes a middleware onto the `web` group that matches each resolved route against a list of names, falling back to URI patterns for unnamed routes, and either redirects to `/auth/sso` or returns 404.
+
+If your application genuinely serves both — customers with passwords, staff through SSO — switch it off:
 
 ```env
-QUADSSO_DISABLE_LOCAL_AUTH=true
+QUADSSO_DISABLE_LOCAL_AUTH=false
 ```
 
-The package then pushes a middleware onto the `web` group that matches each resolved route against a list of names, falling back to URI patterns for unnamed routes, and either redirects to `/auth/sso` or returns 404.
+`php artisan quadsso:doctor` then warns if reachable reset routes remain, so the bypass stays visible rather than silent.
 
 Both lists are in `config/quadsso.php` and cover the common scaffolds by default:
 
@@ -499,7 +505,7 @@ Every value below is the package default; set the variable only to change it.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `QUADSSO_DISABLE_LOCAL_AUTH` | `false` | Block the app's registration and password-reset routes. |
+| `QUADSSO_DISABLE_LOCAL_AUTH` | `true` | Block the app's registration and password-reset routes. Set `false` for mixed password/SSO apps. |
 | `QUADSSO_LOCAL_AUTH_RESPONSE` | `redirect` | `redirect` or `404`. |
 | `QUADSSO_LOCAL_AUTH_REDIRECT` | `/auth/sso` | Where `redirect` sends the visitor. |
 

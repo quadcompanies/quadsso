@@ -117,6 +117,68 @@ class DoctorCommandTest extends TestCase
         $this->assertFalse($report['ok']);
     }
 
+    // ---------------------------------------------------------------------
+    // Local auth lockout
+    // ---------------------------------------------------------------------
+
+    public function test_reports_the_lockout_as_enabled_by_default(): void
+    {
+        $row = $this->check($this->report(), 'lockout');
+
+        $this->assertSame('PASS', $row['status']);
+        $this->assertStringContainsString('enabled', $row['detail']);
+    }
+
+    public function test_confirms_the_lockout_middleware_is_registered(): void
+    {
+        $this->assertSame('PASS', $this->check($this->report(), 'lockout middleware')['status']);
+    }
+
+    /**
+     * Switching the lockout off is legitimate for a mixed-auth application, but
+     * leaving reachable reset routes behind is the SSO bypass — so it is
+     * reported, and reported against the real route table.
+     */
+    public function test_warns_when_the_lockout_is_off_and_reset_routes_exist(): void
+    {
+        config(['quadsso.disable_local_auth.enabled' => false]);
+
+        \Illuminate\Support\Facades\Route::middleware('web')
+            ->get('forgot-password', fn() => 'form')->name('password.request');
+
+        $row = $this->check($this->report(), 'lockout');
+
+        $this->assertSame('WARN', $row['status']);
+        $this->assertStringContainsString('password reset bypasses SSO', $row['detail']);
+    }
+
+    /**
+     * No such routes means no bypass, so there is nothing to warn about.
+     */
+    public function test_does_not_nag_when_there_are_no_local_auth_routes(): void
+    {
+        config(['quadsso.disable_local_auth.enabled' => false]);
+
+        $row = $this->check($this->report(), 'lockout');
+
+        $this->assertSame('PASS', $row['status']);
+        $this->assertStringContainsString('no local auth routes', $row['detail']);
+    }
+
+    public function test_warns_when_break_glass_login_is_blocked(): void
+    {
+        config(['quadsso.disable_local_auth.route_names' => ['login', 'register']]);
+
+        $row = $this->check($this->report(), 'break-glass login');
+
+        $this->assertSame('WARN', $row['status']);
+    }
+
+    public function test_no_break_glass_warning_with_the_default_route_list(): void
+    {
+        $this->assertNull($this->check($this->report(), 'break-glass login'));
+    }
+
     public function test_reports_the_management_api_as_disabled_by_default(): void
     {
         $row = $this->check($this->report(), 'endpoint');

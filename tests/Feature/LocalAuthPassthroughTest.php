@@ -6,12 +6,22 @@ use Illuminate\Routing\Router;
 use QuadCompanies\QuadSSO\Tests\TestCase;
 
 /**
- * The same routes with the feature OFF, which is the default. A package that
- * silently 404s its host application's routes would be hostile, so the opt-in
- * needs a test of its own.
+ * The same routes with the lockout explicitly switched off.
+ *
+ * The default is on, so an application that genuinely serves both password auth
+ * and SSO — customers with passwords, staff through the IdP — needs a supported
+ * way back to its own routes. This is that escape hatch.
  */
 class LocalAuthPassthroughTest extends TestCase
 {
+    protected function defineEnvironment($app): void
+    {
+        parent::defineEnvironment($app);
+
+        // Read at boot to decide whether to register the middleware.
+        $app['config']->set('quadsso.disable_local_auth.enabled', false);
+    }
+
     protected function defineRoutes($router): void
     {
         $router->middleware('web')->group(function (Router $router) {
@@ -21,7 +31,7 @@ class LocalAuthPassthroughTest extends TestCase
         });
     }
 
-    public function test_lockout_is_off_by_default(): void
+    public function test_the_lockout_can_be_switched_off(): void
     {
         $this->assertFalse(config('quadsso.disable_local_auth.enabled'));
     }

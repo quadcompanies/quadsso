@@ -337,8 +337,14 @@ return [
     | Disable Local Authentication Routes
     |--------------------------------------------------------------------------
     |
-    | Opt-in. Blocks the host application's registration and password-reset
-    | routes so the identity provider stays the only way in.
+    | On by default. Blocks the host application's registration and
+    | password-reset routes so the identity provider stays the only way in.
+    |
+    | Installing this package is a statement that the IdP owns authentication,
+    | so the local routes stop being reachable at that point rather than when
+    | somebody remembers to set a flag. Set QUADSSO_DISABLE_LOCAL_AUTH=false if
+    | the application genuinely serves both — customers with passwords and
+    | staff through SSO, say.
     |
     | This matters most for password reset. Users provisioned through SSO get a
     | random, unusable password; if the reset flow stays reachable they can set
@@ -354,7 +360,7 @@ return [
     */
 
     'disable_local_auth' => [
-        'enabled' => env('QUADSSO_DISABLE_LOCAL_AUTH', false),
+        'enabled' => env('QUADSSO_DISABLE_LOCAL_AUTH', true),
 
         // 'redirect' sends the visitor to redirect_to; '404' pretends the route
         // was never there.

@@ -5,6 +5,39 @@ All notable changes to QuadSSO will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-08-21
+
+### Changed
+
+- **`QUADSSO_DISABLE_LOCAL_AUTH` now defaults to `true`.** Installing this
+  package is a statement that the identity provider owns authentication, so the
+  application's registration and password-reset routes stop being reachable at
+  that point rather than when somebody remembers to set a flag.
+
+  **Upgrading will start redirecting `/register`, `/forgot-password`,
+  `/reset-password/*` and `/password/*` to `/auth/sso`.** If an application
+  genuinely serves both password auth and SSO, set
+  `QUADSSO_DISABLE_LOCAL_AUTH=false` before upgrading.
+
+  `/login` is still not blocked, so break-glass access survives an IdP outage.
+
+  The previous default left a silent hole: password reset is an SSO bypass —
+  a provisioned user holds a random password they never knew, but the reset
+  flow lets them set one at their IdP-verified address and sign in locally from
+  then on, never touching the IdP again and surviving deactivation there. An
+  opt-in control that protects nobody until it is remembered is the wrong
+  default for that.
+
+### Added
+
+- **`quadsso:doctor` reports on the lockout.** It matches the real route table
+  rather than the config alone, so an application with no registration or reset
+  routes is not nagged about a bypass it does not have, while one that has
+  switched the lockout off with those routes still reachable is warned
+  explicitly. It also confirms the middleware is registered, and warns if
+  `login` has been added to the blocked list, which would remove the only way
+  back in when the IdP is unavailable.
+
 ## [2.1.0] - 2026-08-21
 
 ### Added
