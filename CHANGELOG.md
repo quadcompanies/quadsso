@@ -5,6 +5,32 @@ All notable changes to QuadSSO will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-08-21
+
+### Added
+
+- **The login button now renders failure messages.** A refused login redirects
+  back to the login page with a flashed reason, but unless the host application
+  happened to render it the redirect was indistinguishable from a page refresh —
+  the user got no indication of what went wrong.
+
+  `<x-quadsso::login-button />` now emits an error region directly above the
+  button. It is always in the DOM and only takes on styling once populated, so
+  an empty one is invisible while `[data-quadsso-login-error]` stays available
+  as a target for client-side code. Restyle with `error-class`, suppress with
+  `:show-errors="false"`; `:unstyled` drops the styling but keeps the message.
+
+### Changed
+
+- Failure messages are flashed to a dedicated `quadsso` error bag under the key
+  `sso`, rather than to the default bag under `email`. A failed SSO login was
+  surfacing beneath the application's email field, which is both misleading and
+  duplicated once the button renders its own region.
+
+  If you render `$errors->first('email')` on your login page to show SSO
+  failures, either read the new bag or set `QUADSSO_ERROR_BAG=default` to
+  restore the previous grouping.
+
 ## [2.0.0] - 2026-08-20
 
 ### Removed — BREAKING

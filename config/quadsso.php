@@ -317,6 +317,19 @@ return [
 
     'ui' => [
         'button_label' => env('QUADSSO_BUTTON_LABEL', 'Login via SSO'),
+
+        /*
+        | Named error bag carrying SSO failure messages.
+        |
+        | A dedicated bag rather than the default one, so a failed SSO login
+        | does not surface under the host application's email or password
+        | field — which is both misleading and, if the login button renders its
+        | own error region, duplicated.
+        |
+        | Set to 'default' to merge these into the application's normal error
+        | display instead.
+        */
+        'error_bag' => env('QUADSSO_ERROR_BAG', 'quadsso'),
     ],
 
     /*

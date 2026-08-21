@@ -541,6 +541,7 @@ Every value below is the package default; set the variable only to change it.
 |---|---|---|
 | `QUADSSO_USER_MODEL` | `App\Models\User` | Custom user model. |
 | `QUADSSO_BUTTON_LABEL` | `Login via SSO` | Default label for the login button component. |
+| `QUADSSO_ERROR_BAG` | `quadsso` | Error bag carrying SSO failure messages. `default` merges them into your form's errors. |
 | `QUADSSO_LOGGING` | `false` | Master switch for the info-level trace — see [Logging](#logging). Refusals are logged regardless. |
 | `QUADSSO_LOG_CHANNEL` | — | Route the trace to a dedicated log channel. |
 | `QUADSSO_LOG_SSO_EVENTS` | `false` | Trace login redirect, callback, and identity resolution. |
@@ -665,6 +666,36 @@ Any other attribute (`id`, `data-*`, `aria-*`, `wire:navigate`) passes through t
 ```
 
 It renders exactly the same markup, but takes a label only — anything needing classes, a slot, or other attributes should use the component.
+
+### Failure messages
+
+When a login is refused — suspended account, unverified email, no matching identity — the user is redirected back to your login page with a flashed reason. The component renders it directly above the button, so a refusal reads as a refusal rather than an unexplained page refresh.
+
+```html
+<div data-quadsso-login>
+    <div data-quadsso-login-error role="alert" aria-live="polite" class="mb-3 rounded-md bg-red-50 ...">
+        <p>Your account has been suspended. Please contact an administrator.</p>
+    </div>
+    <a href="/auth/sso" class="...">Login via SSO</a>
+</div>
+```
+
+The region is **always in the DOM** and only picks up styling once it has something to show, so an empty one is invisible and your own JavaScript has a stable `[data-quadsso-login-error]` target to write into.
+
+Messages go to a dedicated `quadsso` error bag rather than the default one, so a failed SSO login does not surface under your email or password field. If you would rather they joined your form's normal error display:
+
+```env
+QUADSSO_ERROR_BAG=default
+```
+
+Restyle or suppress the region as needed:
+
+```blade
+<x-quadsso::login-button error-class="alert alert-danger" />
+<x-quadsso::login-button :show-errors="false" />
+```
+
+`:unstyled` drops the error styling along with the button styling; the message still renders.
 
 #### Tailwind has to be told where the component lives
 
@@ -872,6 +903,7 @@ The suite runs against Testbench with an in-memory SQLite database. It is writte
 | `SchemaValidationTest` | The boot-time warning covers every config key that names a column, not just `field_mappings` |
 | `RouteGuardTest` | The middleware stack on each route, including that SLO stays outside `web` |
 | `ManagementApiTest` / `Disabled` / `Throttle` | Key enforcement, action semantics, hook ordering and veto, and that the route does not exist while disabled |
+| `LoginButtonErrorsTest` | Failure messages reach the login page, are escaped, and stay out of the app's own error bag |
 | `LoginButtonTest` | The button's destination, labelling, escaping, and that caller styling wins |
 | `LocalAuthLockoutTest` / `LocalAuthPassthroughTest` | The registration/reset lockout blocks what it should and nothing else, and stays off until asked |
 

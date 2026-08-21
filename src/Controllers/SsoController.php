@@ -427,11 +427,16 @@ class SsoController extends Controller
      * Using redirect()->route() against a path throws RouteNotFoundException,
      * which Laravel renders as HTTP 500 — masking the actual auth failure with
      * a server-error page. redirect() takes a path directly.
+     *
+     * Flashed to a named error bag so the message belongs to the SSO button
+     * rather than appearing under the application's email field. Without
+     * somewhere to render it, a failed login is indistinguishable from a page
+     * refresh — which is what <x-quadsso::login-button /> exists to fix.
      */
     private function redirectAfterFailure(string $message): RedirectResponse
     {
         return redirect(config('quadsso.sso.redirect_after_failure', '/login'))
-            ->withErrors(['email' => $message]);
+            ->withErrors(['sso' => $message], (string) config('quadsso.ui.error_bag', 'quadsso'));
     }
 
     /**

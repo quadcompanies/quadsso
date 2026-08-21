@@ -1,6 +1,8 @@
 @props([
     'text' => null,
     'unstyled' => false,
+    'showErrors' => true,
+    'errorClass' => null,
 ])
 
 @php
@@ -25,9 +27,38 @@
         : 'bg-indigo-600 text-white hover:bg-indigo-500 focus-visible:ring-indigo-600';
 
     $classes = $unstyled ? '' : trim($structure . ' ' . $palette);
+
+    // Failures redirect back here with a flashed message. Without somewhere to
+    // render it the redirect is indistinguishable from a page refresh, so the
+    // region lives with the button rather than relying on the host application
+    // having wired up an error display.
+    $ssoErrors = [];
+
+    if ($showErrors && isset($errors) && $errors instanceof \Illuminate\Support\ViewErrorBag) {
+        $ssoErrors = $errors->getBag((string) config('quadsso.ui.error_bag', 'quadsso'))->all();
+    }
+
+    $errorClasses = $errorClass
+        ?? ($unstyled
+            ? ''
+            : 'mb-3 rounded-md bg-red-50 p-3 text-sm text-red-700'
+                . ' dark:bg-red-950/50 dark:text-red-300');
 @endphp
 
-<a
-    href="{{ route('sso.redirect') }}"
-    {{ $attributes->merge($classes === '' ? [] : ['class' => $classes]) }}
->{{ $slot->isEmpty() ? $label : $slot }}</a>
+<div data-quadsso-login>
+    @if ($showErrors)
+        {{-- Always present so client-side code has somewhere to write, but only
+             styled when populated, so an empty region stays invisible. --}}
+        <div
+            data-quadsso-login-error
+            role="alert"
+            aria-live="polite"
+            @if ($ssoErrors !== [] && $errorClasses !== '') class="{{ $errorClasses }}" @endif
+        >@foreach ($ssoErrors as $ssoError)<p>{{ $ssoError }}</p>@endforeach</div>
+    @endif
+
+    <a
+        href="{{ route('sso.redirect') }}"
+        {{ $attributes->merge($classes === '' ? [] : ['class' => $classes]) }}
+    >{{ $slot->isEmpty() ? $label : $slot }}</a>
+</div>
