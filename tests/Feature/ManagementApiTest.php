@@ -357,7 +357,8 @@ class ManagementApiTest extends TestCase
         $this->manage(['action' => 'SUSPEND', 'email' => $user->email])->assertOk();
         $this->manage(['action' => 'UNSUSPEND', 'email' => $user->email])
             ->assertOk()
-            ->assertJson(['sessions_cleared' => null]);
+            ->assertJsonMissingPath('sessions_cleared')
+            ->assertJsonMissingPath('sessions_ended');
 
         $this->assertSame(0, $this->sessionCountFor($user->id));
     }

@@ -15,7 +15,9 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Laravel\Socialite\Facades\Socialite;
+use QuadCompanies\QuadSSO\Middleware\EnforceSessionRevocation;
 use QuadCompanies\QuadSSO\Support\QuadSsoLog;
+use QuadCompanies\QuadSSO\Support\SessionRevoker;
 
 class SsoController extends Controller
 {
@@ -275,6 +277,11 @@ class SsoController extends Controller
 
         Auth::login($user, remember: (bool) config('quadsso.sso.remember_login', false));
 
+        // Record when this session was established so revocation can tell it
+        // apart from one issued after the account was reinstated. Set after
+        // Auth::login(), which regenerates the session id.
+        request()->session()->put(EnforceSessionRevocation::SESSION_KEY, now()->getTimestamp());
+
         QuadSsoLog::trace(QuadSsoLog::SSO, 'login authorised, session established', [
             'user_id'     => $user->id,
             'external_id' => $externalId,
@@ -518,18 +525,24 @@ class SsoController extends Controller
         $user = $userModel::where($externalIdField, $externalId)->first();
 
         if ($user) {
-            $deleted = DB::table('sessions')->where('user_id', $user->id)->delete();
+            // Same revocation path as the management API, so back-channel
+            // logout works on a stateless session driver too — previously this
+            // deleted rows that never existed and reported success.
+            $result = app(SessionRevoker::class)->revoke($user);
 
-            // Cycle the remember token so any "remember me" cookies are invalidated
-            if (config('quadsso.sso.invalidate_remember_tokens_on_slo', true)) {
-                $user->setRememberToken(\Illuminate\Support\Str::random(60));
-                $user->save();
+            if (!$result['effective']) {
+                QuadSsoLog::warning('SLO could not terminate the session', [
+                    'user_id'     => $user->getKey(),
+                    'external_id' => $externalId,
+                    'driver'      => $result['driver'],
+                    'notes'       => $result['notes'],
+                ]);
             }
 
             QuadSsoLog::trace(QuadSsoLog::SLO, 'SLO accepted, sessions invalidated', [
-                'user_id'     => $user->id,
+                'user_id'     => $user->getKey(),
                 'external_id' => $externalId,
-                'sessions'    => $deleted,
+                'result'      => $result,
             ]);
         } else {
             // User not found — could be a user that was never synced; log and accept.

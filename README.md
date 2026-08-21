@@ -390,6 +390,78 @@ The master switch wins: with `QUADSSO_LOGGING=true`, a category set to `false` i
 
 ---
 
+## Ending sessions
+
+Deleting a session row only ends a session when the driver keeps rows. **Laravel Cloud defaults to the `cookie` driver**, where the session lives entirely in the client's cookie and the server holds no record of it — there is nothing to delete, and a table-based approach achieves nothing while appearing to succeed.
+
+So QuadSSO revokes the other way round: a timestamp on the user marks the moment every existing session became invalid, and middleware rejects any session established before it.
+
+```bash
+php artisan migrate      # adds users.quadsso_sessions_valid_after
+```
+
+That is all the setup required. The middleware registers itself on the `web` group, and the check costs no extra queries — Laravel's session guard already loads the user row on every authenticated request, so the timestamp arrives with it.
+
+It applies to `SUSPEND`, `DELETE`, and back-channel `SLO` alike, and works on every session driver.
+
+### What actually happens on revoke
+
+| Step | Applies when |
+|---|---|
+| Delete session rows | `session.driver` is `database` — resolved through `session.connection` and `session.table`, not assumed |
+| Stamp the revocation timestamp | Always, once the migration has run. This is the part that works on `cookie` |
+| Cycle the remember token | Always — a remember-me cookie outlives session rows |
+| Cycle the password hash | Only with `QUADSSO_CYCLE_PASSWORD_ON_REVOKE=true` |
+
+The management API reports what it managed:
+
+```json
+{"status":"ok","action":"SUSPEND","sessions_ended":true,
+ "sessions_cleared":null,"session_driver":"cookie"}
+```
+
+`sessions_ended: false` means the account is blocked but a live session may still be usable. `sessions_cleared` is `null` rather than `0` when the driver keeps no rows, so a genuine "zero rows" is never confused with "this driver has no rows to count".
+
+### Sessions created before you upgraded
+
+The column is null until the first revocation, so installing this logs nobody out. A session with no recorded establishment time — one predating the upgrade, or created by your own login form — counts as older than any revocation, so it is revoked too once a timestamp is stamped.
+
+### Password-hash cycling
+
+```env
+QUADSSO_CYCLE_PASSWORD_ON_REVOKE=true
+```
+
+A second, independent revocation path for applications running Laravel's own `auth.session` middleware, which compares the session's stored password hash against the user's current one. Harmless for SSO-provisioned users, who hold a random unusable password already.
+
+Two caveats: it invalidates a real password if the account has one, and `AuthenticateSession` returns early when `getAuthPassword()` is empty — so it does nothing in applications that neutralise the password to block local login. The two hardenings are mutually exclusive.
+
+### Turning it off
+
+`QUADSSO_SESSION_REVOCATION=false` skips the stamp and does not register the middleware. On a server-side driver you still get row deletion; on `cookie` nothing will be able to end a session.
+
+---
+
+## Diagnostics
+
+```bash
+php artisan quadsso:doctor
+```
+
+Checks the things that fail silently: a session driver that keeps no server-side record, a status column named in config that does not exist, a revocation column that was never migrated, a `sessions` table on the wrong connection, an SLO route that has drifted inside the `web` group.
+
+```
+| Area       | Check                          | Status | Detail                                     |
+| sessions   | session.driver                 | WARN   | cookie keeps no server-side session record |
+| sessions   | revocation column              | PASS   | users.quadsso_sessions_valid_after         |
+| sessions   | revocation middleware          | PASS   | active on the web group                    |
+| schema     | provisioning.user_status_field | PASS   | users.status                               |
+```
+
+Add `--json` for machine-readable output; the exit code is non-zero when any check fails, so it works in a deploy pipeline. It is the fastest way to answer "why does SSO behave differently here" without hand-crafting a tinker one-liner.
+
+---
+
 ## Environment variables
 
 ### Required
@@ -419,7 +491,9 @@ Every value below is the package default; set the variable only to change it.
 |---|---|---|
 | `SSO_REMEMBER_LOGIN` | `false` | Issue a remember-me cookie on login. Outlives deprovisioning — leave off unless SLO is confirmed working. |
 | `SSO_ENABLE_SLO` | `true` | Accept back-channel logout. When false, the endpoint returns 403. |
-| `SSO_INVALIDATE_REMEMBER_TOKENS_ON_SLO` | `true` | Cycle `remember_token` on logout. |
+| `QUADSSO_SESSION_REVOCATION` | `true` | Stamp a revocation timestamp so sessions are rejected on their next request — see [Ending sessions](#ending-sessions). |
+| `QUADSSO_SESSION_REVOKED_AT_FIELD` | `quadsso_sessions_valid_after` | Column holding the revocation timestamp. |
+| `QUADSSO_CYCLE_PASSWORD_ON_REVOKE` | `false` | Also cycle the password hash, for apps using `auth.session`. |
 
 **Locking out local authentication** — see [Locking out local auth](#locking-out-local-authentication)
 
@@ -792,6 +866,8 @@ The suite runs against Testbench with an in-memory SQLite database. It is writte
 | `IdentityResolutionTest` | Who is allowed to become which local row — sub-over-email precedence, one-time binding, JIT gating, blocked users |
 | `SloTokenTest` | Logout tokens are the endpoint's only access control: forged keys, `alg: none`, RS→HS confusion, foreign issuer, wrong audience, replay |
 | `ConfigInjectionTest` | IdP-supplied values stay data; config-supplied column names fail closed |
+| `SessionRevocationTest` | Revocation works on a stateless driver, honours `session.connection`/`table`, and rejects stale sessions |
+| `DoctorCommandTest` | The diagnostic surfaces cookie drivers, missing columns, and unregistered middleware |
 | `LoggingTest` | The trace is opt-in, refusals are not, and channel routing works |
 | `SchemaValidationTest` | The boot-time warning covers every config key that names a column, not just `field_mappings` |
 | `RouteGuardTest` | The middleware stack on each route, including that SLO stays outside `web` |

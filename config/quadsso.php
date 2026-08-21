@@ -137,9 +137,6 @@ return [
         // Enable back-channel Single Logout (SLO)
         'enable_slo' => env('SSO_ENABLE_SLO', true),
 
-        // Cycle the remember token on SLO so "remember me" cookies stop working
-        'invalidate_remember_tokens_on_slo' => env('SSO_INVALIDATE_REMEMBER_TOKENS_ON_SLO', true),
-
         /*
         | Issue a "remember me" cookie on SSO login.
         |
@@ -201,6 +198,53 @@ return [
         | the only way a user can ever be attached to their IdP identity.
         */
         'allow_legacy_email_binding' => env('SSO_ALLOW_LEGACY_EMAIL_BINDING', true),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Session Revocation
+    |--------------------------------------------------------------------------
+    |
+    | Ending a user's session is not the same as deleting a session row.
+    |
+    | On the `cookie` driver — Laravel Cloud's default — the session lives
+    | entirely in the client's cookie and the server keeps no record of it.
+    | There is nothing to delete, so a table-based approach silently achieves
+    | nothing while appearing to succeed.
+    |
+    | So revocation works the other way round: a timestamp on the user marks
+    | the moment every existing session became invalid, and middleware rejects
+    | any session established before it. That is driver-agnostic, and it costs
+    | no extra queries because the auth guard already loads the user row on
+    | every authenticated request.
+    |
+    | Requires the revocation migration and the middleware this package
+    | registers. Run `php artisan quadsso:doctor` to confirm both are in place.
+    |
+    */
+
+    'sessions' => [
+        'revocation' => env('QUADSSO_SESSION_REVOCATION', true),
+
+        'revoked_at_field' => env('QUADSSO_SESSION_REVOKED_AT_FIELD', 'quadsso_sessions_valid_after'),
+
+        /*
+        | Also cycle the password hash when revoking.
+        |
+        | Off by default. For applications running Laravel's own
+        | `auth.session` middleware this is a second, independent revocation
+        | path: AuthenticateSession compares the session's stored hash against
+        | the user's current one and logs out on mismatch.
+        |
+        | Harmless for SSO-provisioned users, who hold a random unusable
+        | password already — but it does invalidate a real password if the
+        | account has one, so it stays opt-in.
+        |
+        | Note that AuthenticateSession returns early when getAuthPassword() is
+        | empty, so this does nothing in applications that neutralise the
+        | password to block local login.
+        */
+        'cycle_password_on_revoke' => env('QUADSSO_CYCLE_PASSWORD_ON_REVOKE', false),
     ],
 
     /*

@@ -20,12 +20,18 @@ class RouteGuardTest extends TestCase
      * Testbench ships an empty 'web' group. Define the real Laravel stack so
      * that resolving a route's middleware says something meaningful about what
      * would actually run in a host application.
+     *
+     * Applied after boot, not in defineEnvironment: appending middleware via
+     * the HTTP kernel calls syncMiddlewareToRouter(), which overwrites
+     * router-level group definitions with the kernel's own. In a real
+     * application the kernel is the source of truth so that is correct, but a
+     * group registered straight onto the router beforehand would be discarded.
      */
-    protected function defineEnvironment($app): void
+    protected function setUp(): void
     {
-        parent::defineEnvironment($app);
+        parent::setUp();
 
-        $app['router']->middlewareGroup('web', [
+        $this->app['router']->middlewareGroup('web', [
             \Illuminate\Cookie\Middleware\EncryptCookies::class,
             \Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse::class,
             \Illuminate\Session\Middleware\StartSession::class,

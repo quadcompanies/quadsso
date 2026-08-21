@@ -61,13 +61,41 @@ class SloTokenTest extends TestCase
         );
     }
 
-    public function test_remember_token_is_left_alone_when_the_option_is_off(): void
+    /**
+     * Cycling the remember token is no longer optional: a remember-me cookie
+     * outlives session rows, so leaving it intact would make "logged out
+     * everywhere" untrue.
+     */
+    public function test_remember_token_is_always_cycled(): void
     {
-        config(['quadsso.sso.invalidate_remember_tokens_on_slo' => false]);
+        $this->slo($this->genuineLogoutToken())->assertOk();
+
+        $this->assertNotSame('original-remember-token', $this->user->fresh()->remember_token);
+    }
+
+    /**
+     * The case that started all this: on a driver with no server-side session
+     * record, deleting rows achieves nothing, so revocation has to be stamped
+     * on the user instead.
+     */
+    public function test_slo_revokes_on_a_stateless_session_driver(): void
+    {
+        config(['session.driver' => 'cookie']);
 
         $this->slo($this->genuineLogoutToken())->assertOk();
 
-        $this->assertSame('original-remember-token', $this->user->fresh()->remember_token);
+        $this->assertNotNull(
+            $this->user->fresh()->quadsso_sessions_valid_after,
+            'a cookie-driver session can only be ended by stamping revocation'
+        );
+    }
+
+    public function test_slo_stamps_revocation_on_a_database_driver_too(): void
+    {
+        $this->slo($this->genuineLogoutToken())->assertOk();
+
+        $this->assertNotNull($this->user->fresh()->quadsso_sessions_valid_after);
+        $this->assertSame(0, $this->sessionCountFor($this->user->id));
     }
 
     // ---------------------------------------------------------------------

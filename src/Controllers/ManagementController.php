@@ -13,6 +13,7 @@ use Illuminate\Support\Str;
 use QuadCompanies\QuadSSO\Contracts\UserLifecycleHooks;
 use QuadCompanies\QuadSSO\Support\NullUserLifecycleHooks;
 use QuadCompanies\QuadSSO\Support\QuadSsoLog;
+use QuadCompanies\QuadSSO\Support\SessionRevoker;
 
 /**
  * Out-of-band account management for callers that hold the management API key.
@@ -88,21 +89,21 @@ class ManagementController extends Controller
             return $veto;
         }
 
-        $sessions = null;
+        $revocation = null;
 
-        DB::transaction(function () use ($user, &$sessions) {
-            $sessions = $this->terminateSessions($user);
+        DB::transaction(function () use ($user, &$revocation) {
+            $revocation = $this->terminateSessions($user);
             $this->markBlocked($user);
         });
 
         $postHookFailed = $this->runAfter(fn() => $hooks->afterSuspend($user), 'afterSuspend', $user);
 
         QuadSsoLog::trace(QuadSsoLog::API, 'management API completed SUSPEND', [
-            'user_id'  => $user->getKey(),
-            'sessions' => $sessions,
+            'user_id'    => $user->getKey(),
+            'revocation' => $revocation,
         ]);
 
-        return $this->ok('SUSPEND', $user, $sessions, $postHookFailed);
+        return $this->ok('SUSPEND', $user, $revocation, $postHookFailed);
     }
 
     /**
@@ -141,11 +142,11 @@ class ManagementController extends Controller
             return $veto;
         }
 
-        $sessions = null;
+        $revocation = null;
         $userId = $user->getKey();
 
-        DB::transaction(function () use ($user, &$sessions) {
-            $sessions = $this->terminateSessions($user);
+        DB::transaction(function () use ($user, &$revocation) {
+            $revocation = $this->terminateSessions($user);
 
             // Blocked first, so that a soft-deleting model left recoverable is
             // still refused at login if it is ever restored.
@@ -165,42 +166,20 @@ class ManagementController extends Controller
         $postHookFailed = $this->runAfter(fn() => $hooks->afterDelete($user), 'afterDelete', $user);
 
         QuadSsoLog::trace(QuadSsoLog::API, 'management API completed DELETE', [
-            'user_id'  => $userId,
-            'sessions' => $sessions,
+            'user_id'    => $userId,
+            'revocation' => $revocation,
         ]);
 
-        return $this->ok('DELETE', $user, $sessions, $postHookFailed);
+        return $this->ok('DELETE', $user, $revocation, $postHookFailed);
     }
 
     /**
-     * Terminate every database-backed session for this user.
-     *
-     * Tolerates a missing sessions table: an application on the file or redis
-     * session driver still wants suspension to deactivate the account, and
-     * failing the whole request over a table it never had would be unhelpful.
-     * Returns null when the count could not be determined.
+     * Delegate to the shared revoker, which handles the session driver, the
+     * revocation stamp, and token cycling — and reports what it could not do.
      */
-    private function terminateSessions(Model $user): ?int
+    private function terminateSessions(Model $user): array
     {
-        $deleted = null;
-
-        try {
-            $deleted = DB::table('sessions')->where('user_id', $user->getKey())->delete();
-        } catch (\Throwable $e) {
-            QuadSsoLog::warning('management API could not clear the sessions table', [
-                'user_id' => $user->getKey(),
-                'error'   => $e->getMessage(),
-            ]);
-        }
-
-        // Remember-me cookies outlive session rows, so cycling the token is part
-        // of ending a session, not an extra.
-        if (method_exists($user, 'setRememberToken')) {
-            $user->setRememberToken(Str::random(60));
-            $user->save();
-        }
-
-        return $deleted;
+        return app(SessionRevoker::class)->revoke($user);
     }
 
     private function markBlocked(Model $user): void
@@ -284,15 +263,31 @@ class ManagementController extends Controller
         return $hooks;
     }
 
-    private function ok(string $action, Model $user, ?int $sessions, bool $postHookFailed): JsonResponse
+    /**
+     * Report what revocation actually achieved rather than a bare success.
+     * `sessions_ended` false means the account is blocked but a live session
+     * may still be usable — the caller needs to know that.
+     */
+    private function ok(string $action, Model $user, ?array $revocation, bool $postHookFailed): JsonResponse
     {
-        return response()->json([
+        $payload = [
             'status'           => 'ok',
             'action'           => $action,
             'user_id'          => $user->getKey(),
-            'sessions_cleared' => $sessions,
             'post_hook_failed' => $postHookFailed,
-        ]);
+        ];
+
+        if ($revocation !== null) {
+            $payload['sessions_ended'] = $revocation['effective'];
+            $payload['sessions_cleared'] = $revocation['rows_deleted'];
+            $payload['session_driver'] = $revocation['driver'];
+
+            if ($revocation['notes'] !== []) {
+                $payload['session_notes'] = $revocation['notes'];
+            }
+        }
+
+        return response()->json($payload);
     }
 
     private function error(string $message, int $status, array $extra = []): JsonResponse

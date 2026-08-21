@@ -28,6 +28,10 @@ abstract class TestCase extends Orchestra
             'prefix'   => '',
         ]);
 
+        // These tests create a sessions table and seed rows into it, so the
+        // driver has to match or the revoker correctly declines to touch it.
+        $app['config']->set('session.driver', 'database');
+
         $app['config']->set('quadsso.user_model', User::class);
         $app['config']->set('auth.providers.users.model', User::class);
 

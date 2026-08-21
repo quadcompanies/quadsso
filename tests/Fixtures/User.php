@@ -30,5 +30,8 @@ class User extends Authenticatable
 
     protected $hidden = ['password', 'remember_token'];
 
-    protected $casts = ['email_verified_at' => 'datetime'];
+    protected $casts = [
+        'email_verified_at' => 'datetime',
+        'quadsso_sessions_valid_after' => 'datetime',
+    ];
 }

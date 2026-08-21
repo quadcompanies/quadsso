@@ -50,7 +50,13 @@ class QuadSSOServiceProvider extends ServiceProvider
             $event->extendSocialite('authentik', \SocialiteProviders\Authentik\Provider::class);
         });
 
+        $this->enforceSessionRevocation();
+
         $this->blockLocalAuthRoutes();
+
+        if ($this->app->runningInConsole()) {
+            $this->commands([\QuadCompanies\QuadSSO\Console\DoctorCommand::class]);
+        }
 
         $this->registerUserObserver();
 
@@ -76,6 +82,35 @@ class QuadSSOServiceProvider extends ServiceProvider
                 . "'attributes' => new \\Illuminate\\View\\ComponentAttributeBag(),"
                 . "'slot' => new \\Illuminate\\View\\ComponentSlot(),"
                 . "])->render(); ?>";
+        });
+    }
+
+    /**
+     * Register the middleware that rejects sessions issued before a user was
+     * revoked. Appended through the kernel for the same reason as the local
+     * auth lockout: a router-level push is discarded when the kernel syncs its
+     * own group definitions.
+     */
+    protected function enforceSessionRevocation(): void
+    {
+        if (!config('quadsso.sessions.revocation', true)) {
+            return;
+        }
+
+        $middleware = \QuadCompanies\QuadSSO\Middleware\EnforceSessionRevocation::class;
+
+        $this->app->booted(function () use ($middleware) {
+            if ($this->app->bound(\Illuminate\Contracts\Http\Kernel::class)) {
+                $kernel = $this->app->make(\Illuminate\Contracts\Http\Kernel::class);
+
+                if (method_exists($kernel, 'appendMiddlewareToGroup')) {
+                    $kernel->appendMiddlewareToGroup('web', $middleware);
+
+                    return;
+                }
+            }
+
+            $this->app['router']->pushMiddlewareToGroup('web', $middleware);
         });
     }
 
