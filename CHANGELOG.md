@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Blocking is no longer driven by this package.** SCIM was the only writer of
   the blocked status value; the SSO callback still reads it, so wire your own
   admin tooling to set it if you need a local kill switch.
+- `SSO_INVALIDATE_REMEMBER_TOKENS_ON_SLO`. Cycling the remember token is no
+  longer optional: a remember-me cookie outlives session rows, so leaving it
+  intact made "logged out everywhere" untrue.
 - Dead configuration keys that nothing read: `authentik.logout_url`
   (`AUTHENTIK_LOGOUT_URL` — no front-channel logout is implemented),
   `scim.enabled` (`SCIM_ENABLED`), `scim.path` (`SCIM_BASE_PATH`), `scim.domain`
@@ -47,6 +50,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behaviour, but read the README's revocation section first.
 
 ### Added
+
+- **Driver-agnostic session revocation.** Deleting session rows only ends a
+  session when the driver keeps rows; on the `cookie` driver — Laravel Cloud's
+  default — the session lives entirely in the client's cookie and the server
+  holds no record of it, so the previous approach achieved nothing while
+  appearing to succeed.
+
+  A `quadsso_sessions_valid_after` timestamp on the user now marks the moment
+  every existing session became invalid, and `EnforceSessionRevocation`
+  middleware rejects any session established before it. This costs no extra
+  queries: the session guard already loads the user row on every authenticated
+  request. Applied by `SUSPEND`, `DELETE` and back-channel `SLO` alike, via a
+  shared `SessionRevoker`.
+
+  Null until the first revocation, so installing it logs nobody out. Disable
+  with `QUADSSO_SESSION_REVOCATION=false`.
+
+- **`php artisan quadsso:doctor`**, a diagnostic for the failure modes that are
+  otherwise silent: a session driver keeping no server-side record, a status
+  column named in config that does not exist, a revocation column never
+  migrated, a sessions table on the wrong connection, an SLO route that has
+  drifted inside the `web` group. `--json` for machine-readable output, non-zero
+  exit on failure.
+
+- **`QUADSSO_CYCLE_PASSWORD_ON_REVOKE`** (default off), a second revocation path
+  for applications running Laravel's `auth.session` middleware, which logs out
+  any session whose stored password hash no longer matches.
 
 - **`UNSUSPEND` action** on the management API, lifting a block set by
   `SUSPEND`. It restores the status column to a reintroduced
@@ -123,6 +153,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a role column is commonly shared with the host application.
 
 ### Fixed
+
+- **Session termination ignored `session.connection` and `session.table`.**
+  `DB::table('sessions')` assumed the default connection and a table literally
+  named `sessions`, so an application with either configured differently had its
+  sessions left intact while the call reported success. Both are now resolved
+  the way Laravel's own database session handler resolves them.
+
+- **Session termination reported success it had not achieved.** A driver keeping
+  no server-side rows produced `sessions_cleared: 0` and HTTP 200 while the user
+  stayed signed in. The management API now reports `sessions_ended`, the session
+  driver, and notes explaining anything it could not do; `sessions_cleared` is
+  `null` rather than `0` when no rows exist to count, so a genuine zero is never
+  confused with an inapplicable one.
 
 - **The login block check failed open on a misconfigured status column.**
   `$user->$statusField` is attribute access, not a query, so a
