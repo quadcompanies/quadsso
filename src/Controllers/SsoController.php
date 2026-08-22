@@ -15,6 +15,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Laravel\Socialite\Facades\Socialite;
+use Laravel\Socialite\Two\InvalidStateException;
 use QuadCompanies\QuadSSO\Middleware\EnforceSessionRevocation;
 use QuadCompanies\QuadSSO\Support\QuadSsoLog;
 use QuadCompanies\QuadSSO\Support\SessionRevoker;
@@ -49,9 +50,7 @@ class SsoController extends Controller
         try {
             $socialUser = Socialite::driver('authentik')->user();
         } catch (\Exception $e) {
-            QuadSsoLog::error('identity provider handshake failed', [
-                'error' => $e->getMessage(),
-            ]);
+            $this->logHandshakeFailure($e, request());
 
             return $this->redirectAfterFailure(
                 'Authentication failed. Please try again.'
@@ -316,6 +315,71 @@ class SsoController extends Controller
         }
 
         return false;
+    }
+
+    /**
+     * Explain why the handshake failed, in terms an operator can act on.
+     *
+     * Socialite throws InvalidStateException with no message at all, so the
+     * previous log line read `{"error":""}` — technically accurate and
+     * completely useless. Since that is also the single most common failure,
+     * it gets a specific explanation and the context needed to tell its causes
+     * apart, rather than leaving someone to reason about it from a blank string.
+     */
+    private function logHandshakeFailure(\Throwable $e, Request $request): void
+    {
+        $context = [
+            'exception'      => get_class($e),
+            'error'          => $e->getMessage(),
+            'host'           => $request->getHost(),
+            'state_returned' => $request->filled('state'),
+            'code_returned'  => $request->filled('code'),
+            'session_empty'  => $this->sessionLooksUnrelated($request),
+        ];
+
+        // Authentik reports a refusal as query parameters rather than an
+        // exception, so surface those instead of losing them.
+        if ($request->filled('error')) {
+            $context['idp_error'] = $request->query('error');
+            $context['idp_error_description'] = $request->query('error_description');
+        }
+
+        if (!$e instanceof InvalidStateException) {
+            QuadSsoLog::error('identity provider handshake failed', $context);
+
+            return;
+        }
+
+        QuadSsoLog::error(
+            'login failed: the OAuth state did not survive the round trip. The session that '
+            . 'began the login is not the session that came back, so the state parameter could '
+            . 'not be matched. Usual causes: the login started on a different host (www versus '
+            . 'apex) so the session cookie was never returned; a cookie-driver session that grew '
+            . 'past the browser 4KB limit and was dropped; SESSION_SAME_SITE set to strict; a '
+            . 'proxy the application does not trust, so it builds URLs for the wrong scheme or '
+            . 'host; or simply a reloaded or bookmarked callback URL, which can never succeed '
+            . 'because the state is consumed on first use. A session_empty of true points at the '
+            . 'cookie not coming back; false points at a stale or replayed callback.',
+            $context
+        );
+    }
+
+    /**
+     * Does this look like a session other than the one that started the login?
+     *
+     * Socialite pulls `state` before throwing, so its absence proves nothing by
+     * the time we get here. A session holding nothing but framework bookkeeping
+     * is a freshly minted one, which means the original cookie never came back.
+     */
+    private function sessionLooksUnrelated(Request $request): bool
+    {
+        if (!$request->hasSession()) {
+            return true;
+        }
+
+        $keys = array_keys($request->session()->all());
+
+        return array_diff($keys, ['_token', '_previous', '_flash']) === [];
     }
 
     /**

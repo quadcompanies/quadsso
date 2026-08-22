@@ -863,6 +863,7 @@ QUADSSO_LOGGING=true
 
 | Symptom | Cause |
 |---|---|
+| `Authentication failed. Please try again.` | A state mismatch. The log carries the explanation and a `session_empty` flag: `true` means the session cookie never came back (host mismatch, oversized cookie session, strict SameSite, untrusted proxy); `false` means a stale or replayed callback URL. |
 | `No account found for this identity` | No provisioning path matched. Enable JIT, or create the user locally first. Check they're assigned to the application in Authentik. |
 | `Your email address has not been verified...` | The IdP returned `email_verified=false`. The package will not bind or provision on an unverified address. |
 | `Your account has been suspended` | The user's status column holds the blocked value. |

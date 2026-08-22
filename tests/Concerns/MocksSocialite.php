@@ -38,8 +38,22 @@ trait MocksSocialite
      */
     protected function fakeIdpFailure(string $message = 'invalid state'): void
     {
+        $this->fakeIdpException(new \RuntimeException($message));
+    }
+
+    /**
+     * The specific failure Socialite raises when the OAuth state does not match
+     * — thrown with no message at all, which is what made it hard to diagnose.
+     */
+    protected function fakeInvalidState(): void
+    {
+        $this->fakeIdpException(new \Laravel\Socialite\Two\InvalidStateException());
+    }
+
+    protected function fakeIdpException(\Throwable $e): void
+    {
         $provider = Mockery::mock(\Laravel\Socialite\Two\AbstractProvider::class);
-        $provider->shouldReceive('user')->andThrow(new \RuntimeException($message));
+        $provider->shouldReceive('user')->andThrow($e);
 
         Socialite::shouldReceive('driver')->with('authentik')->andReturn($provider);
     }

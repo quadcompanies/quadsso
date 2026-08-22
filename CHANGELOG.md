@@ -5,6 +5,25 @@ All notable changes to QuadSSO will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - 2026-08-21
+
+### Fixed
+
+- **A failed OAuth handshake logged nothing usable.** Socialite throws
+  `InvalidStateException` with no message, so the most common SSO failure
+  recorded itself as `{"error":""}` — accurate and impossible to act on.
+
+  The callback now names the exception, explains what a state mismatch means,
+  and records the request host, whether `state` and `code` came back, and a
+  `session_empty` flag distinguishing "the session cookie never returned"
+  (host mismatch, an oversized cookie-driver session, strict SameSite, an
+  untrusted proxy) from "a stale or replayed callback URL". A refusal at the
+  identity provider — which arrives as `?error=` query parameters rather than
+  an exception — is now surfaced too, where it was previously dropped.
+
+  The message shown to the visitor is unchanged and stays generic; the
+  diagnostics go to the log.
+
 ## [2.2.0] - 2026-08-21
 
 ### Changed
