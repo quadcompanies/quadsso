@@ -16,6 +16,60 @@ class QuadSSOServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->mergeConfigFrom(__DIR__ . '/../config/quadsso.php', 'quadsso');
+
+        // mergeConfigFrom() merges top-level keys only. Every setting in this
+        // package lives one or two levels down, so an application that published
+        // config/quadsso.php takes its whole 'logging' (or 'sso', or 'sessions')
+        // array from that file — and any key added to the package afterwards
+        // reads back as null there, silently, until somebody re-publishes.
+        //
+        // That is how a debugging switch can be set in .env and do nothing at
+        // all, which is a bad way to spend an evening.
+        $this->fillMissingConfig(__DIR__ . '/../config/quadsso.php', 'quadsso');
+    }
+
+    /**
+     * Supply package defaults for keys a published config file does not define.
+     *
+     * Deliberately not array_replace_recursive(). That merges list-shaped values
+     * index by index, so an application that trimmed disable_local_auth
+     * .route_names to one entry would silently get the package's remaining six
+     * back — changing which routes are blocked without anyone asking for it.
+     *
+     * A value the application defines is therefore kept exactly as it stands,
+     * lists included. Only genuinely absent keys are filled in.
+     */
+    protected function fillMissingConfig(string $path, string $key): void
+    {
+        $config = $this->app['config'];
+
+        $config->set($key, $this->withDefaults(
+            require $path,
+            (array) $config->get($key, [])
+        ));
+    }
+
+    private function withDefaults(array $defaults, array $configured): array
+    {
+        foreach ($defaults as $key => $default) {
+            if (!array_key_exists($key, $configured)) {
+                $configured[$key] = $default;
+
+                continue;
+            }
+
+            // Recurse into option groups, never into lists of values.
+            if (is_array($default) && is_array($configured[$key]) && $this->isOptionGroup($default)) {
+                $configured[$key] = $this->withDefaults($default, $configured[$key]);
+            }
+        }
+
+        return $configured;
+    }
+
+    private function isOptionGroup(array $value): bool
+    {
+        return $value !== [] && array_keys($value) !== range(0, count($value) - 1);
     }
 
     public function boot(): void

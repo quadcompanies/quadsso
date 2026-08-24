@@ -30,6 +30,11 @@ php artisan vendor:publish --tag=quadsso-config
 php artisan migrate
 ```
 
+A published config file does not go stale: from 2.6.0 onward, settings added to
+the package in later versions are filled in with their defaults for any key your
+file does not define, so there is no need to re-publish after an upgrade. Values
+you *have* set are always kept, including lists you deliberately trimmed.
+
 The service provider is auto-discovered. See [Database changes](#database-changes) for exactly what `migrate` alters.
 
 ### 2. Session driver

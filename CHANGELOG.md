@@ -5,6 +5,34 @@ All notable changes to QuadSSO will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] - 2026-08-24
+
+### Fixed
+
+- **A published config file silently swallowed every new setting.**
+  `mergeConfigFrom()` merges top-level keys only, and every setting in this
+  package lives one or two levels below one. An application that ran
+  `vendor:publish --tag=quadsso-config` therefore supplies the whole `logging`
+  array from its own file, and any key added to the package afterwards reads
+  back as `null` there — no error, no warning.
+
+  `QUADSSO_LOG_SESSION_WATCHDOG=true` set in `.env` did nothing at all for
+  exactly this reason: `quadsso.logging.session_watchdog` was absent from the
+  published file, the middleware never registered, and the switch appeared to be
+  broken rather than unread.
+
+  Package defaults are now filled in for keys a published file does not define.
+  Values the application *does* define are kept exactly as they stand.
+
+  This is deliberately **not** `array_replace_recursive()`. That merges
+  list-shaped values index by index, so an application that trimmed
+  `disable_local_auth.route_names` to one entry would silently get the package's
+  remaining six back, changing which routes are blocked without anyone asking.
+  Only genuinely absent keys are filled; a published `false` stays `false`.
+
+  Applications that published their config no longer need to re-publish to pick
+  up settings added in 2.3.0 and later.
+
 ## [2.5.0] - 2026-08-24
 
 The 2.4.0 store check answered its question and moved the fault outside the
