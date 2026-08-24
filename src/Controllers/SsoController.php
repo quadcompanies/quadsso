@@ -53,10 +53,12 @@ class SsoController extends Controller
         $response = Socialite::driver('authentik')->redirect();
 
         $context = [
-            'session_present'  => $hasSession,
-            'session_id'       => $hasSession ? $request->session()->getId() : null,
-            'state_stored_fp'  => $this->fingerprint($hasSession ? $request->session()->get('state') : null),
-            'host'             => $request->getHost(),
+            'session_present' => $hasSession,
+            'session_id'      => $hasSession ? $request->session()->getId() : null,
+            'state_stored_fp' => $this->fingerprint($hasSession ? $request->session()->get('state') : null),
+            'session_driver'  => config('session.driver'),
+            'previous_url'    => $hasSession ? $request->session()->previousUrl() : null,
+            'host'            => $request->getHost(),
         ];
 
         if ($priorState !== null) {
@@ -67,7 +69,69 @@ class SsoController extends Controller
 
         QuadSsoLog::trace(QuadSsoLog::SSO, 'login started, redirecting to the identity provider', $context);
 
+        if ($hasSession) {
+            $this->verifySessionWrite($request->session()->getId(), $context['state_stored_fp']);
+        }
+
         return $response;
+    }
+
+    /**
+     * Confirm, after the request has ended, that the state actually reached the
+     * session store.
+     *
+     * Everything up to this point only proves the state was in the session
+     * *object*. Laravel commits that object in StartSession::terminate(), after
+     * the response has been sent, so a store that silently refuses writes — a
+     * table that vanished, a read-only or full disk, a driver pointed somewhere
+     * that no longer exists — produces a redirect leg that looks perfect and a
+     * callback with nothing to match against.
+     *
+     * Registered as a terminating callback, which the framework runs after the
+     * session middleware has saved. Its absence from the log is itself the
+     * finding: it means terminate() never ran, and nothing was ever going to be
+     * written.
+     */
+    private function verifySessionWrite(string $sessionId, ?string $expectedFp): void
+    {
+        app()->terminating(function () use ($sessionId, $expectedFp) {
+            if (!QuadSsoLog::enabled(QuadSsoLog::SSO)) {
+                return;
+            }
+
+            try {
+                $raw = app('session')->driver()->getHandler()->read($sessionId);
+            } catch (\Throwable $e) {
+                QuadSsoLog::error('could not read the session back after the redirect leg', [
+                    'session_id' => $sessionId,
+                    'error'      => $e->getMessage(),
+                ]);
+
+                return;
+            }
+
+            $bytes = is_string($raw) ? strlen($raw) : 0;
+            $attributes = $bytes > 0 ? @unserialize($raw) : null;
+
+            $context = [
+                'session_id'      => $sessionId,
+                'expected_fp'     => $expectedFp,
+                'payload_bytes'   => $bytes,
+                // False on an encrypted store, where the handler hands back
+                // ciphertext. Distinguishes "unreadable here" from "not written".
+                'payload_readable' => is_array($attributes),
+            ];
+
+            if (is_array($attributes)) {
+                $persisted = $attributes['state'] ?? null;
+
+                $context['state_persisted']    = $persisted !== null;
+                $context['state_persisted_fp'] = $this->fingerprint(is_string($persisted) ? $persisted : null);
+                $context['persisted_keys']     = array_keys($attributes);
+            }
+
+            QuadSsoLog::trace(QuadSsoLog::SSO, 'session store checked after the redirect leg', $context);
+        });
     }
 
     /**
@@ -492,6 +556,11 @@ class SsoController extends Controller
                 ? hash_equals($stored, $returned)
                 : null,
             'code_returned'     => $request->filled('code'),
+            // The last GET this session handled. If it is not the auth/sso route
+            // then the redirect leg's write never reached the row, whatever the
+            // redirect leg's own log line claimed to hold in memory.
+            'previous_url'      => $session->previousUrl(),
+            'session_driver'    => config('session.driver'),
             'host'              => $request->getHost(),
         ];
     }

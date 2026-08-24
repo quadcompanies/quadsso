@@ -413,6 +413,22 @@ Same `session_id` on both lines, same `state_stored_fp`, `state_matches: true`. 
 | `false` | `session_empty: false` | The session came back, but the state was already consumed. A reloaded, bookmarked or replayed callback URL — it can never succeed twice. |
 | `true` | `state_matches: false` | A second login started before this one returned and overwrote the state. Look for two `login started` lines and compare `state_stored_fp` against `replaced_state_fp`. |
 
+### When the state is stored but never arrives
+
+If the two legs share a `session_id` and `state_returned_fp` matches the redirect leg's `state_stored_fp`, yet the callback reports `state_in_session: false`, the handshake itself is fine — the state was written to the session object and was gone from the row by the time the callback read it. Two lines separate the causes.
+
+`session store checked after the redirect leg` reads the session row back after the request has ended, once Laravel's session middleware has committed it:
+
+```
+QuadSSO: session store checked after the redirect leg {"session_id":"7EoTh44H...","expected_fp":"a41f9c2e","payload_bytes":184,"payload_readable":true,"state_persisted":true,"state_persisted_fp":"a41f9c2e","persisted_keys":["_token","_previous","_flash","state"]}
+```
+
+- **`state_persisted: false`, or `payload_bytes: 0`** — the store is not accepting writes. The session table, the disk it sits on, or the driver is the problem, not the SSO flow.
+- **The line is missing entirely** — `terminate()` never ran for that request, so nothing was ever going to be written.
+- **`state_persisted: true`** — the write landed, and something removed it before the callback. Session writes are last-write-wins on the whole payload, so any request that loaded the session *before* the state was added and saved *after* will silently drop it. `previous_url` on the callback names the last GET the session handled; if it is not `/auth/sso`, that request is your culprit.
+
+`payload_readable: false` with a non-zero `payload_bytes` just means the store is encrypted and the handler returned ciphertext — not a fault.
+
 `replaced_state_fp` appears on the redirect leg only when it found a state already waiting — the signature of a double-click, a prefetching browser, or an impatient reload.
 
 State nonces are never written out, only fingerprinted (first 8 hex of SHA-256). That is enough to compare them across lines without putting a credential in flight into your log aggregator.

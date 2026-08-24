@@ -330,6 +330,105 @@ class HandshakeFailureTest extends TestCase
             ->once();
     }
 
+    // ---------------------------------------------------------------------
+    // Did the write actually reach the store?
+    // ---------------------------------------------------------------------
+
+    /**
+     * The redirect leg can only see the session object. Laravel commits it in
+     * StartSession::terminate(), after the response is sent, so a store that
+     * silently refuses writes yields a perfect-looking redirect leg and a
+     * callback with nothing to match. This reads the row back afterwards.
+     */
+    public function test_the_session_store_is_checked_after_the_redirect_leg(): void
+    {
+        config(['quadsso.logging.sso_events' => true]);
+
+        $this->fakeIdpUser(sub: 'sub-ada');
+
+        Log::spy();
+        $this->get('/auth/sso');
+
+        Log::shouldHaveReceived('info')
+            ->withArgs(fn($message, $context) => str_contains($message, 'session store checked')
+                && $context['state_persisted'] === true
+                && $context['state_persisted_fp'] === substr(hash('sha256', self::FAKE_STATE), 0, 8)
+                && in_array('state', $context['persisted_keys'], true))
+            ->once();
+    }
+
+    /**
+     * payload_bytes separates "the store wrote nothing" from "the store wrote
+     * something this process cannot read", which is what an encrypted session
+     * looks like from the handler.
+     */
+    public function test_the_store_check_reports_what_it_could_read(): void
+    {
+        config(['quadsso.logging.sso_events' => true]);
+
+        $this->fakeIdpUser(sub: 'sub-ada');
+
+        Log::spy();
+        $this->get('/auth/sso');
+
+        Log::shouldHaveReceived('info')
+            ->withArgs(fn($message, $context) => str_contains($message, 'session store checked')
+                && $context['payload_readable'] === true
+                && $context['payload_bytes'] > 0
+                && $context['expected_fp'] === substr(hash('sha256', self::FAKE_STATE), 0, 8))
+            ->once();
+    }
+
+    /**
+     * The verification costs a read of the session row, so it stays behind the
+     * same switch as the rest of the trace.
+     */
+    public function test_the_store_check_is_silent_when_tracing_is_off(): void
+    {
+        config(['quadsso.logging.enabled' => false, 'quadsso.logging.sso_events' => false]);
+
+        $this->fakeIdpUser(sub: 'sub-ada');
+
+        Log::spy();
+        $this->get('/auth/sso');
+
+        Log::shouldNotHaveReceived('info');
+    }
+
+    /**
+     * Names the request that last wrote the session. When it is not the auth/sso
+     * route, the redirect leg's write never reached the row — whatever that leg
+     * claimed to be holding in memory.
+     */
+    public function test_the_callback_records_the_last_url_the_session_handled(): void
+    {
+        $this->fakeInvalidState();
+
+        Log::spy();
+        $this->withSession(['_previous' => ['url' => 'http://localhost/admin/login']])
+            ->callbackWith(['state' => 'abc', 'code' => 'xyz']);
+
+        Log::shouldHaveReceived('error')
+            ->withArgs(fn($message, $context) => ($context['previous_url'] ?? null)
+                === 'http://localhost/admin/login')
+            ->once();
+    }
+
+    public function test_both_legs_record_the_session_driver(): void
+    {
+        config(['quadsso.logging.sso_events' => true]);
+
+        $this->fakeInvalidState();
+
+        Log::spy();
+        $this->callbackWith(['state' => 'abc', 'code' => 'xyz']);
+
+        Log::shouldHaveReceived('error')
+            ->withArgs(fn($message, $context) => ($context['session_driver'] ?? null)
+                === config('session.driver'))
+            ->once();
+    }
+
     public function test_failures_are_logged_even_with_logging_switched_off(): void
     {
         config(['quadsso.logging.enabled' => false, 'quadsso.logging.sso_events' => false]);

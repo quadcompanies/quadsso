@@ -5,6 +5,43 @@ All notable changes to QuadSSO will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-08-24
+
+Diagnostics for a failure the 2.3.0 logging narrowed down but could not finish:
+a login where the session cookie round-trips correctly, the identity provider
+echoes back exactly the state that was stored, and the state is nonetheless
+absent from the session by the time the callback reads it.
+
+### Added
+
+- **`session store checked after the redirect leg`.** Everything logged up to
+  now only proved the state was in the session *object*. Laravel commits that
+  object in `StartSession::terminate()`, after the response has been sent, so a
+  store that silently refuses writes — a table that vanished, a read-only or
+  full disk, a driver pointed somewhere that no longer exists — produces a
+  redirect leg that looks perfect and a callback with nothing to match against.
+
+  The package now reads the session row back once the request has ended and
+  reports `state_persisted`, `state_persisted_fp`, `persisted_keys`,
+  `payload_bytes` and `payload_readable`. `payload_bytes` separates "the store
+  wrote nothing" from "the store wrote something this process cannot read",
+  which is what an encrypted session looks like from the handler.
+
+  The line's **absence** is itself a finding: it means `terminate()` never ran,
+  and nothing was ever going to be written.
+
+  It runs behind `QUADSSO_LOG_SSO_EVENTS`, since it costs a read of the session
+  row.
+
+- **`previous_url` on both legs** — the last GET the session handled. When the
+  callback reports anything other than the `auth/sso` route, the redirect leg's
+  write never reached the row, whatever that leg claimed to be holding in
+  memory.
+
+- **`session_driver` on both legs**, so a driver that is not what the `.env`
+  says — a stale config cache, most often — is visible in the log rather than
+  needing to be discovered separately.
+
 ## [2.3.0] - 2026-08-23
 
 ### Added
