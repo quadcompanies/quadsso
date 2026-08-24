@@ -389,6 +389,7 @@ Leave it unset to use the application default channel.
 | Variable | Default | Covers |
 |---|---|---|
 | `QUADSSO_LOG_SSO_EVENTS` | `false` | Login redirect, callback, identity resolution, attribute sync, blocked local-auth routes |
+| `QUADSSO_LOG_SESSION_WATCHDOG` | `false` | Debugging only: what every web request did to the OAuth state — see [Finding the request that removed it](#finding-the-request-that-removed-it) |
 | `QUADSSO_LOG_SLO_EVENTS` | `true` | Back-channel logout: request received, token verified, sessions invalidated |
 | `QUADSSO_LOG_API_EVENTS` | `false` | Management API hits, authorization, actions, lifecycle hooks |
 
@@ -428,6 +429,28 @@ QuadSSO: session store checked after the redirect leg {"session_id":"7EoTh44H...
 - **`state_persisted: true`** — the write landed, and something removed it before the callback. Session writes are last-write-wins on the whole payload, so any request that loaded the session *before* the state was added and saved *after* will silently drop it. `previous_url` on the callback names the last GET the session handled; if it is not `/auth/sso`, that request is your culprit.
 
 `payload_readable: false` with a non-zero `payload_bytes` just means the store is encrypted and the handler returned ciphertext — not a fault.
+
+#### Finding the request that removed it
+
+When `state_persisted` is `true` and the callback still comes back without it, the culprit is a different request, and no amount of logging inside the login flow can see it. Switch on the watchdog and reproduce:
+
+```env
+QUADSSO_LOG_SESSION_WATCHDOG=true
+QUADSSO_LOG_SSO_EVENTS=true
+```
+
+Every request through the `web` group then reports what it did to the state:
+
+```
+QuadSSO: session state observed across a request {"method":"GET","path":"/auth/sso","state_on_entry":null,"state_on_exit":"c8bcd3c1","state_consumed":false,"state_introduced":true}
+QuadSSO: session state observed across a request {"method":"POST","path":"/livewire/update","ajax":true,"state_on_entry":"c8bcd3c1","state_on_exit":null,"state_consumed":true,"state_introduced":false}
+```
+
+Grep for `state_consumed` — exactly one request should take the state away, and it should be `/auth/sso/callback`. In the example above it is not, and the second line names the fault.
+
+`session_id_after` appears when a request regenerated the session id, which orphans whatever the old id held and looks identical to a lost state from the callback's side.
+
+It logs a line per request, so turn it off once you have the answer. It also observes the session *object* within a request: a concurrent request that loaded the session earlier and saved a stale copy over the top destroys the state without ever holding it, and shows up here as a request that never had it — method, path and timing are what identify that case.
 
 `replaced_state_fp` appears on the redirect leg only when it found a state already waiting — the signature of a double-click, a prefetching browser, or an impatient reload.
 

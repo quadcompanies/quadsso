@@ -5,6 +5,48 @@ All notable changes to QuadSSO will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2026-08-24
+
+The 2.4.0 store check answered its question and moved the fault outside the
+login flow entirely: the state reaches the session store, the store confirms it,
+and ten seconds later the callback reads the same session row without it. Nothing
+inside the SSO request can see what removed it, because the removal happens in a
+different request.
+
+### Added
+
+- **`QUADSSO_LOG_SESSION_WATCHDOG`** — a debugging switch that reports, for every
+  request through the web group, whether the OAuth state was present when the
+  request began and whether it was still there when it finished.
+
+  ```
+  QuadSSO: session state observed across a request {"method":"POST","path":"/livewire/update","ajax":true,"session_id":"PsUgRzxR...","state_on_entry":"c8bcd3c1","state_on_exit":null,"state_consumed":true,"state_introduced":false}
+  ```
+
+  Grep for `state_consumed` — exactly one request should take the state away, and
+  it should be the SSO callback. Anything else that does is the fault. A request
+  that regenerates the session id reports `session_id_after` as well, since an
+  orphaned id is indistinguishable from a lost state at the callback.
+
+  Off by default, and requires the trace to be on. It logs a line per request,
+  which is unreadable in production and exactly what is wanted while reproducing
+  a fault on a development machine.
+
+  One honest limit, documented on the middleware: it observes the session object
+  within a request. A concurrent request that loaded the session earlier and
+  saved a stale copy over the top destroys the state without ever holding it, so
+  it appears here as a request that never had it. Method, path and timing are
+  what identify that case.
+
+### Fixed
+
+- **The Socialite test double did not consume the state.** Real Socialite reads
+  it with `pull()` — which removes it — as the first thing `user()` does,
+  including on the path that throws `InvalidStateException`. The double simply
+  threw, so no test could distinguish code that inspects the session before the
+  handshake from code that inspects it afterwards, which is precisely the
+  distinction 2.3.0 was written to fix.
+
 ## [2.4.0] - 2026-08-24
 
 Diagnostics for a failure the 2.3.0 logging narrowed down but could not finish:

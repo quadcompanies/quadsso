@@ -50,6 +50,8 @@ class QuadSSOServiceProvider extends ServiceProvider
             $event->extendSocialite('authentik', \SocialiteProviders\Authentik\Provider::class);
         });
 
+        $this->traceSessionState();
+
         $this->enforceSessionRevocation();
 
         $this->blockLocalAuthRoutes();
@@ -136,6 +138,36 @@ class QuadSSOServiceProvider extends ServiceProvider
         }
 
         $middleware = \QuadCompanies\QuadSSO\Middleware\BlockLocalAuthRoutes::class;
+
+        $this->app->booted(function () use ($middleware) {
+            if ($this->app->bound(\Illuminate\Contracts\Http\Kernel::class)) {
+                $kernel = $this->app->make(\Illuminate\Contracts\Http\Kernel::class);
+
+                if (method_exists($kernel, 'appendMiddlewareToGroup')) {
+                    $kernel->appendMiddlewareToGroup('web', $middleware);
+
+                    return;
+                }
+            }
+
+            $this->app['router']->pushMiddlewareToGroup('web', $middleware);
+        });
+    }
+
+    /**
+     * Report which request removes the OAuth state from the session.
+     *
+     * Prepended rather than appended: it has to wrap as much of the web group as
+     * possible, so that a request removing the state inside another middleware is
+     * still seen doing it.
+     */
+    protected function traceSessionState(): void
+    {
+        if (!config('quadsso.logging.session_watchdog', false)) {
+            return;
+        }
+
+        $middleware = \QuadCompanies\QuadSSO\Middleware\TraceSessionState::class;
 
         $this->app->booted(function () use ($middleware) {
             if ($this->app->bound(\Illuminate\Contracts\Http\Kernel::class)) {

@@ -429,6 +429,25 @@ return [
         */
         'channel' => env('QUADSSO_LOG_CHANNEL'),
 
+        /*
+        | Session write watchdog — a debugging tool, not an operational one.
+        |
+        | For the case where the OAuth state is written to the session store and
+        | is gone again before the callback reads it. By then the login flow has
+        | done everything right and cannot see what went wrong, because the state
+        | was removed by a different request entirely.
+        |
+        | Switched on, every request through the web group reports whether the
+        | state was present when it began and when it finished. Exactly one
+        | request should consume it — the SSO callback. Anything else that does
+        | is the fault.
+        |
+        | Requires the trace to be on as well (QUADSSO_LOGGING or
+        | QUADSSO_LOG_SSO_EVENTS). Logs a line per request, so turn it off again
+        | once you have your answer.
+        */
+        'session_watchdog' => env('QUADSSO_LOG_SESSION_WATCHDOG', false),
+
         // Per-category switches, for turning on one stream without the rest.
         'sso_events' => env('QUADSSO_LOG_SSO_EVENTS', false),
         'slo_events' => env('QUADSSO_LOG_SLO_EVENTS', true),

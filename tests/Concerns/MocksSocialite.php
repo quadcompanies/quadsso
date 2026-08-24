@@ -32,7 +32,11 @@ trait MocksSocialite
         $socialUser->user = array_merge(['email_verified' => $emailVerified], $raw);
 
         $provider = $this->fakeProvider();
-        $provider->shouldReceive('user')->andReturn($socialUser);
+        $provider->shouldReceive('user')->andReturnUsing(function () use ($socialUser) {
+            $this->consumeState();
+
+            return $socialUser;
+        });
 
         Socialite::shouldReceive('driver')->with('authentik')->andReturn($provider);
     }
@@ -61,6 +65,20 @@ trait MocksSocialite
     }
 
     /**
+     * What Socialite does first inside user(): read the stored state with pull(),
+     * which removes it — including on the path that throws InvalidStateException.
+     * The mock has to do this too, or a test cannot tell code that inspects the
+     * session before the handshake from code that inspects it afterwards, which
+     * is the whole point of the handshake snapshot.
+     */
+    protected function consumeState(): void
+    {
+        if (app()->bound('session') && app('session')->isStarted()) {
+            app('session')->pull('state');
+        }
+    }
+
+    /**
      * Simulate the IdP handshake blowing up (bad state, network error, ...).
      */
     protected function fakeIdpFailure(string $message = 'invalid state'): void
@@ -80,7 +98,11 @@ trait MocksSocialite
     protected function fakeIdpException(\Throwable $e): void
     {
         $provider = $this->fakeProvider();
-        $provider->shouldReceive('user')->andThrow($e);
+        $provider->shouldReceive('user')->andReturnUsing(function () use ($e) {
+            $this->consumeState();
+
+            throw $e;
+        });
 
         Socialite::shouldReceive('driver')->with('authentik')->andReturn($provider);
     }
