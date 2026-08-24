@@ -429,6 +429,27 @@ class HandshakeFailureTest extends TestCase
             ->once();
     }
 
+    /**
+     * The stack that ran before the handler. When the state was in the session
+     * at the edge of the stack and absent here, the answer is in this list.
+     */
+    public function test_the_failure_records_the_middleware_that_ran(): void
+    {
+        $this->fakeInvalidState();
+
+        Log::spy();
+        $this->callbackWith(['state' => 'abc', 'code' => 'xyz']);
+
+        Log::shouldHaveReceived('error')
+            ->withArgs(function ($message, $context) {
+                $chain = $context['route_middleware'] ?? null;
+
+                return is_array($chain)
+                    && in_array(\Illuminate\Session\Middleware\StartSession::class, $chain, true);
+            })
+            ->once();
+    }
+
     public function test_failures_are_logged_even_with_logging_switched_off(): void
     {
         config(['quadsso.logging.enabled' => false, 'quadsso.logging.sso_events' => false]);

@@ -561,8 +561,36 @@ class SsoController extends Controller
             // redirect leg's own log line claimed to hold in memory.
             'previous_url'      => $session->previousUrl(),
             'session_driver'    => config('session.driver'),
+            // Every middleware that ran before this controller. When the state
+            // was present at the edge of the stack and gone by the time the
+            // handler sees it, the answer is somewhere in this list.
+            'route_middleware'  => $this->routeMiddleware($request),
             'host'              => $request->getHost(),
         ];
+    }
+
+    /**
+     * The resolved middleware stack for the current route, in order.
+     *
+     * Groups are expanded to class names, so an application's own additions to
+     * the web group are visible alongside the framework's and this package's.
+     */
+    private function routeMiddleware(Request $request): array
+    {
+        $route = $request->route();
+
+        if ($route === null) {
+            return [];
+        }
+
+        try {
+            return array_values(array_filter(
+                app(\Illuminate\Routing\Router::class)->gatherRouteMiddleware($route),
+                'is_string'
+            ));
+        } catch (\Throwable $e) {
+            return [];
+        }
     }
 
     /**

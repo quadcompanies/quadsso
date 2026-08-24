@@ -98,4 +98,46 @@ class SessionWatchdogTest extends TestCase
                 && $context['state_consumed'] === false)
             ->once();
     }
+
+    /**
+     * When the state is present at the edge of the stack and gone by the time
+     * the handler sees it, the culprit is whatever still runs in between. This
+     * turns that from a guess into a named list.
+     */
+    public function test_it_names_what_still_runs_after_it(): void
+    {
+        $this->fakeInvalidState();
+
+        Log::spy();
+        $this->withSession(['state' => 'the-nonce'])
+            ->get('/auth/sso/callback?state=the-nonce&code=xyz');
+
+        Log::shouldHaveReceived('info')
+            ->withArgs(function ($message, $context) {
+                if (!str_contains($message, 'session state observed')) {
+                    return false;
+                }
+
+                $after = $context['middleware_after_this'] ?? null;
+
+                return is_array($after)
+                    && !in_array(\QuadCompanies\QuadSSO\Middleware\TraceSessionState::class, $after, true);
+            })
+            ->once();
+    }
+
+    /**
+     * A request that never held the state cannot have lost it, so the suspect
+     * list is noise there.
+     */
+    public function test_it_omits_the_suspect_list_when_there_was_no_state(): void
+    {
+        Log::spy();
+        $this->get('/login');
+
+        Log::shouldHaveReceived('info')
+            ->withArgs(fn($message, $context) => str_contains($message, 'session state observed')
+                && !array_key_exists('middleware_after_this', $context))
+            ->once();
+    }
 }

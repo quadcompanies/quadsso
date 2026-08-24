@@ -4,6 +4,7 @@ namespace QuadCompanies\QuadSSO\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
+use Illuminate\Routing\Router;
 use QuadCompanies\QuadSSO\Support\QuadSsoLog;
 
 /**
@@ -61,6 +62,13 @@ class TraceSessionState
             'state_introduced' => $before === null && $after !== null,
         ];
 
+        // When the state was there on the way in and the controller reports it
+        // missing, the culprit is one of these — everything that still gets to
+        // run between this middleware and the route's own handler.
+        if ($before !== null) {
+            $context['middleware_after_this'] = $this->middlewareAfterThis($request);
+        }
+
         if ($idBefore !== $idAfter) {
             // Regeneration orphans whatever the old id held, which looks identical
             // to a lost state from the callback's point of view.
@@ -70,6 +78,36 @@ class TraceSessionState
         QuadSsoLog::trace(QuadSsoLog::SSO, 'session state observed across a request', $context);
 
         return $response;
+    }
+
+    /**
+     * The resolved middleware that still runs after this one on this route.
+     *
+     * Appended group middleware sits closest to the controller, but an
+     * application can append its own after a package's, and a route can add more
+     * of its own on top. Listing them turns "something removed the state" into a
+     * short list of named suspects.
+     */
+    private function middlewareAfterThis(Request $request): array
+    {
+        $route = $request->route();
+
+        if ($route === null) {
+            return [];
+        }
+
+        try {
+            $chain = app(Router::class)->gatherRouteMiddleware($route);
+        } catch (\Throwable $e) {
+            return [];
+        }
+
+        $chain = array_values(array_filter($chain, 'is_string'));
+        $position = array_search(static::class, $chain, true);
+
+        return $position === false
+            ? $chain
+            : array_values(array_slice($chain, $position + 1));
     }
 
     private function fingerprint($value): ?string

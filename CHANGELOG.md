@@ -5,6 +5,36 @@ All notable changes to QuadSSO will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] - 2026-08-24
+
+The 2.5.0 watchdog produced the finding the previous four releases were circling:
+on the callback request, the OAuth state is **present when the request enters the
+middleware stack and absent by the time the controller reads it**. Same request,
+same session id, microseconds apart. The state is not being lost between requests
+at all — something inside the callback's own stack removes it.
+
+### Added
+
+- **`middleware_after_this` on the watchdog line**, listing the resolved
+  middleware that still runs between the watchdog and the route handler.
+  Appended group middleware sits closest to the controller, but an application
+  can append its own after a package's, and a route can add more on top. This
+  turns "something removed the state" into a short list of named suspects.
+
+  Emitted only when the state was actually present on entry — a request that
+  never held it cannot have lost it.
+
+- **`route_middleware` on the handshake snapshot and the failure line** — the
+  whole resolved stack for the callback route, in order, with groups expanded to
+  class names. An application's own additions to the `web` group are visible
+  alongside the framework's and this package's.
+
+### Changed
+
+- **The watchdog now registers last**, so it is appended last and sits closest
+  to the route handler. The gap it cannot see into is as small as the package
+  can make it.
+
 ## [2.6.0] - 2026-08-24
 
 ### Fixed

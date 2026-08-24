@@ -104,11 +104,14 @@ class QuadSSOServiceProvider extends ServiceProvider
             $event->extendSocialite('authentik', \SocialiteProviders\Authentik\Provider::class);
         });
 
-        $this->traceSessionState();
-
         $this->enforceSessionRevocation();
 
         $this->blockLocalAuthRoutes();
+
+        // Registered last so it is appended last, which puts it closest to the
+        // route handler. Anything that removes the state between this middleware
+        // and the controller is then a very short list.
+        $this->traceSessionState();
 
         if ($this->app->runningInConsole()) {
             $this->commands([\QuadCompanies\QuadSSO\Console\DoctorCommand::class]);

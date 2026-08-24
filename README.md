@@ -453,6 +453,8 @@ QuadSSO: session state observed across a request {"method":"POST","path":"/livew
 
 Grep for `state_consumed` — exactly one request should take the state away, and it should be `/auth/sso/callback`. In the example above it is not, and the second line names the fault.
 
+If the callback's own watchdog line reports `state_on_entry` set while the failure line reports `state_in_session: false`, the state is being removed *inside that request*, between the edge of the middleware stack and the controller. `middleware_after_this` then lists everything that still ran in between, and `route_middleware` on the failure line gives the whole stack in order. The culprit is in that list.
+
 `session_id_after` appears when a request regenerated the session id, which orphans whatever the old id held and looks identical to a lost state from the callback's side.
 
 It logs a line per request, so turn it off once you have the answer. It also observes the session *object* within a request: a concurrent request that loaded the session earlier and saved a stale copy over the top destroys the state without ever holding it, and shows up here as a request that never had it — method, path and timing are what identify that case.
