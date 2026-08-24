@@ -394,6 +394,31 @@ Leave it unset to use the application default channel.
 
 The master switch wins: with `QUADSSO_LOGGING=true`, a category set to `false` is still logged.
 
+### Diagnosing a failed handshake
+
+`InvalidStateException` is the most common way an SSO login fails, and the hardest to read: Socialite throws it with no message, and the two halves of a login are separate HTTP requests that share no identifier. Both legs now carry the evidence needed to pair them.
+
+With `QUADSSO_LOG_SSO_EVENTS=true`, a healthy login looks like this:
+
+```
+QuadSSO: login started, redirecting to the identity provider {"session_present":true,"session_id":"7EoTh44H...","state_stored_fp":"a41f9c2e","host":"app.example.com","authorize_host":"id.example.com","redirect_uri":"https://app.example.com/auth/sso/callback"}
+QuadSSO: verifying the OAuth state returned by the identity provider {"session_present":true,"session_id":"7EoTh44H...","session_empty":false,"state_in_session":true,"state_stored_fp":"a41f9c2e","state_returned_fp":"a41f9c2e","state_matches":true,...}
+```
+
+Same `session_id` on both lines, same `state_stored_fp`, `state_matches: true`. When a login fails, read `state_in_session` and `state_matches` together:
+
+| `state_in_session` | Then | Means |
+|---|---|---|
+| `false` | `session_empty: true` | The cookie never came back and this request minted a new session. Look at a host difference between the legs (www versus apex), a cookie-driver session over the browser's 4KB limit, `SESSION_SAME_SITE=strict`, an untrusted proxy building URLs for the wrong host, or two instances with different `APP_KEY`s so the cookie will not decrypt. |
+| `false` | `session_empty: false` | The session came back, but the state was already consumed. A reloaded, bookmarked or replayed callback URL — it can never succeed twice. |
+| `true` | `state_matches: false` | A second login started before this one returned and overwrote the state. Look for two `login started` lines and compare `state_stored_fp` against `replaced_state_fp`. |
+
+`replaced_state_fp` appears on the redirect leg only when it found a state already waiting — the signature of a double-click, a prefetching browser, or an impatient reload.
+
+State nonces are never written out, only fingerprinted (first 8 hex of SHA-256). That is enough to compare them across lines without putting a credential in flight into your log aggregator.
+
+Failures are logged at error level, so they appear whether or not `QUADSSO_LOG_SSO_EVENTS` is on — but the two trace lines above are what turn "it failed" into "here is which of the two legs lost the session", so switch the category on before trying to reproduce.
+
 ---
 
 ## Ending sessions

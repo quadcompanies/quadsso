@@ -24,12 +24,70 @@ class SsoController extends Controller
 {
     /**
      * Redirect the user to the authentik OAuth page.
+     *
+     * Socialite generates the `state` nonce and writes it to the session inside
+     * redirect(); this method only records what it did. The session id and the
+     * state fingerprint are the two values needed to pair this leg with the
+     * callback leg in the log, which is otherwise guesswork across two requests
+     * that share no identifier.
      */
     public function redirect(): RedirectResponse
     {
-        QuadSsoLog::trace(QuadSsoLog::SSO, 'login started, redirecting to the identity provider');
+        $request = request();
+        $hasSession = $request->hasSession();
 
-        return Socialite::driver('authentik')->redirect();
+        if (!$hasSession) {
+            QuadSsoLog::error(
+                'login cannot start: this request has no session, so Socialite has nowhere to '
+                . 'store the OAuth state and the callback can never match it. The auth/sso route '
+                . 'must run inside the web middleware group.'
+            );
+        }
+
+        // Read before Socialite overwrites it. A state already sitting here means
+        // a login was started and never finished — a double-click, a prefetch, or
+        // a reload — and the value about to replace it is what the in-flight
+        // authorization request will come back with.
+        $priorState = $hasSession ? $request->session()->get('state') : null;
+
+        $response = Socialite::driver('authentik')->redirect();
+
+        $context = [
+            'session_present'  => $hasSession,
+            'session_id'       => $hasSession ? $request->session()->getId() : null,
+            'state_stored_fp'  => $this->fingerprint($hasSession ? $request->session()->get('state') : null),
+            'host'             => $request->getHost(),
+        ];
+
+        if ($priorState !== null) {
+            $context['replaced_state_fp'] = $this->fingerprint($priorState);
+        }
+
+        $context += $this->authorizeTargetContext($response);
+
+        QuadSsoLog::trace(QuadSsoLog::SSO, 'login started, redirecting to the identity provider', $context);
+
+        return $response;
+    }
+
+    /**
+     * The parts of the authorization URL worth recording.
+     *
+     * `redirect_uri` is the value authentik will compare against its own
+     * registration, and a mismatch there is indistinguishable from every other
+     * handshake failure once the browser has bounced. The full URL is not logged
+     * because it carries the state nonce.
+     */
+    private function authorizeTargetContext(RedirectResponse $response): array
+    {
+        $target = $response->getTargetUrl();
+
+        parse_str((string) parse_url($target, PHP_URL_QUERY), $query);
+
+        return [
+            'authorize_host' => parse_url($target, PHP_URL_HOST),
+            'redirect_uri'   => $query['redirect_uri'] ?? null,
+        ];
     }
 
     /**
@@ -47,10 +105,17 @@ class SsoController extends Controller
      */
     public function callback(): RedirectResponse
     {
+        // Taken before Socialite runs, because Socialite::user() calls
+        // session()->pull('state') and destroys the evidence on its way to
+        // throwing. A catch block is too late to ask whether state was there.
+        $handshake = $this->handshakeSnapshot(request());
+
+        QuadSsoLog::trace(QuadSsoLog::SSO, 'verifying the OAuth state returned by the identity provider', $handshake);
+
         try {
             $socialUser = Socialite::driver('authentik')->user();
         } catch (\Exception $e) {
-            $this->logHandshakeFailure($e, request());
+            $this->logHandshakeFailure($e, request(), $handshake);
 
             return $this->redirectAfterFailure(
                 'Authentication failed. Please try again.'
@@ -284,6 +349,9 @@ class SsoController extends Controller
         QuadSsoLog::trace(QuadSsoLog::SSO, 'login authorised, session established', [
             'user_id'     => $user->id,
             'external_id' => $externalId,
+            // Auth::login() regenerates the id, so this is deliberately not the
+            // one the callback arrived on.
+            'session_id'  => request()->session()->getId(),
         ]);
 
         $redirectTo = config('quadsso.sso.redirect_after_login', '/home');
@@ -326,16 +394,20 @@ class SsoController extends Controller
      * it gets a specific explanation and the context needed to tell its causes
      * apart, rather than leaving someone to reason about it from a blank string.
      */
-    private function logHandshakeFailure(\Throwable $e, Request $request): void
+    private function logHandshakeFailure(\Throwable $e, Request $request, array $snapshot = []): void
     {
-        $context = [
-            'exception'      => get_class($e),
-            'error'          => $e->getMessage(),
-            'host'           => $request->getHost(),
-            'state_returned' => $request->filled('state'),
-            'code_returned'  => $request->filled('code'),
-            'session_empty'  => $this->sessionLooksUnrelated($request),
-        ];
+        $context = array_merge(
+            [
+                'exception'      => get_class($e),
+                'error'          => $e->getMessage(),
+                'host'           => $request->getHost(),
+                'state_returned' => $request->filled('state'),
+                'code_returned'  => $request->filled('code'),
+            ],
+            // Captured before Socialite consumed the state; overrides the
+            // defaults above with the same keys carrying the same values.
+            $snapshot
+        );
 
         // Authentik reports a refusal as query parameters rather than an
         // exception, so surface those instead of losing them.
@@ -351,35 +423,93 @@ class SsoController extends Controller
         }
 
         QuadSsoLog::error(
-            'login failed: the OAuth state did not survive the round trip. The session that '
-            . 'began the login is not the session that came back, so the state parameter could '
-            . 'not be matched. Usual causes: the login started on a different host (www versus '
-            . 'apex) so the session cookie was never returned; a cookie-driver session that grew '
-            . 'past the browser 4KB limit and was dropped; SESSION_SAME_SITE set to strict; a '
-            . 'proxy the application does not trust, so it builds URLs for the wrong scheme or '
-            . 'host; or simply a reloaded or bookmarked callback URL, which can never succeed '
-            . 'because the state is consumed on first use. A session_empty of true points at the '
-            . 'cookie not coming back; false points at a stale or replayed callback.',
+            'login failed: the OAuth state did not survive the round trip, so the state '
+            . 'parameter could not be matched. Read state_in_session together with '
+            . 'state_matches. state_in_session=false with session_empty=true: the session '
+            . 'cookie never came back, so this request minted a new session — the two legs ran '
+            . 'on different hosts (www versus apex), or a cookie-driver session grew past the '
+            . 'browser 4KB limit, or SESSION_SAME_SITE is strict, or a proxy the application '
+            . 'does not trust made it build URLs for the wrong scheme or host, or the two legs '
+            . 'were served by instances with different APP_KEYs so the cookie would not '
+            . 'decrypt. state_in_session=false with session_empty=false: the session did come '
+            . 'back, but the state had already been consumed — a reloaded, bookmarked or '
+            . 'replayed callback URL, which can never succeed twice. state_in_session=true with '
+            . 'state_matches=false: a second login was started before this one returned, so the '
+            . 'stored state belongs to the newer attempt; look for two "login started" lines and '
+            . 'compare their state_stored_fp and replaced_state_fp. Pair the two legs of any '
+            . 'login by session_id.',
             $context
         );
     }
 
     /**
-     * Does this look like a session other than the one that started the login?
+     * What the returning request actually carries, recorded before anything
+     * consumes it.
      *
-     * Socialite pulls `state` before throwing, so its absence proves nothing by
-     * the time we get here. A session holding nothing but framework bookkeeping
-     * is a freshly minted one, which means the original cookie never came back.
+     * This must run ahead of Socialite::user(). Socialite reads the stored state
+     * with session()->pull('state'), which removes it, so by the time a catch
+     * block asks "was the state there?" the answer is always no — and a previous
+     * version of this class inferred a missing cookie from exactly that, which
+     * reported a session that had round-tripped perfectly as a session that never
+     * came back. Everything below is an observation; nothing is inferred.
      */
-    private function sessionLooksUnrelated(Request $request): bool
+    private function handshakeSnapshot(Request $request): array
     {
-        if (!$request->hasSession()) {
-            return true;
+        $hasSession = $request->hasSession();
+
+        if (!$hasSession) {
+            return [
+                'session_present'  => false,
+                'session_id'       => null,
+                'session_empty'    => true,
+                'state_in_session' => false,
+                'state_returned'   => $request->filled('state'),
+                'code_returned'    => $request->filled('code'),
+                'host'             => $request->getHost(),
+            ];
         }
 
-        $keys = array_keys($request->session()->all());
+        $session = $request->session();
+        $keys = array_keys($session->all());
+        $stored = $session->get('state');
+        $returned = $request->query('state');
 
-        return array_diff($keys, ['_token', '_previous', '_flash']) === [];
+        return [
+            'session_present'   => true,
+            'session_id'        => $session->getId(),
+            // Nothing but framework bookkeeping: a session minted by this very
+            // request, so the original cookie did not come back. Correct only
+            // because this runs before Socialite pulls state — a session holding
+            // state is never freshly minted, since only the redirect leg could
+            // have put it there.
+            'session_empty'     => array_diff($keys, ['_token', '_previous', '_flash']) === [],
+            'session_keys'      => $keys,
+            'state_in_session'  => $stored !== null,
+            'state_stored_fp'   => $this->fingerprint(is_string($stored) ? $stored : null),
+            'state_returned'    => $request->filled('state'),
+            'state_returned_fp' => $this->fingerprint(is_string($returned) ? $returned : null),
+            'state_matches'     => (is_string($stored) && is_string($returned))
+                ? hash_equals($stored, $returned)
+                : null,
+            'code_returned'     => $request->filled('code'),
+            'host'              => $request->getHost(),
+        ];
+    }
+
+    /**
+     * A short, stable fingerprint of a state nonce.
+     *
+     * Enough to tell two states apart across log lines and across the two legs of
+     * a login, without writing the nonce itself into a log that is likely to be
+     * shipped somewhere less trusted than the session store it came from.
+     */
+    private function fingerprint(?string $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        return substr(hash('sha256', $value), 0, 8);
     }
 
     /**

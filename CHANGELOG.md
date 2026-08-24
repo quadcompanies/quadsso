@@ -5,6 +5,60 @@ All notable changes to QuadSSO will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-08-23
+
+### Added
+
+- **The redirect leg is now traced, not just the callback.** `login started,
+  redirecting to the identity provider` previously carried no context at all,
+  which meant the two halves of a login shared no identifier and could only be
+  paired by guessing from timestamps. It now records `session_id`, a
+  `state_stored_fp` fingerprint of the nonce Socialite stored, `authorize_host`,
+  and the `redirect_uri` being sent to authentik — a value that is otherwise
+  invisible until authentik rejects it.
+
+- **`replaced_state_fp`.** A second login started before the first comes back
+  silently overwrites the stored state, and the first callback then fails with
+  nothing to show for it. When the redirect leg finds a state already in the
+  session, it now says so and fingerprints the value it displaced. Double
+  clicks, prefetching browsers and impatient reloads all land here.
+
+- **A new pre-handshake trace line**, `verifying the OAuth state returned by the
+  identity provider`, carrying the full state evidence. It is written before
+  Socialite runs, so it survives failures that never reach the catch block.
+
+- **`session_id` on the success line**, recorded after `Auth::login()` has
+  regenerated it, so the id a session is known by afterwards is in the log.
+
+- **A refusal when the redirect leg has no session at all**, rather than letting
+  Socialite fail obscurely somewhere with nowhere to store state.
+
+### Fixed
+
+- **The handshake diagnostics could assert the exact opposite of the truth.**
+  `session_empty` was computed in the `catch` block, but Socialite reads the
+  stored state with `session()->pull('state')` — which *removes* it — on its way
+  to throwing. A session that had round-tripped perfectly, carrying nothing but
+  its state and framework bookkeeping, was therefore left looking freshly minted
+  and reported as `session_empty: true`: "the cookie never came back", about a
+  cookie that had.
+
+  The evidence is now captured *before* the handshake runs, and is observed
+  rather than inferred: `state_in_session`, `state_matches`, `state_stored_fp`,
+  `state_returned_fp`, `session_present`, `session_id` and `session_keys`. The
+  error message explains how to read them together instead of resting on one
+  overloaded boolean.
+
+  State nonces are fingerprinted (first 8 hex of SHA-256) rather than written
+  out — enough to pair the two legs of a login, without putting a credential in
+  flight into a log that travels further than the session store does.
+
+### Changed
+
+- No log message text changed, and no context key was removed. `session_empty`
+  keeps its name and now reports honestly; everything else is additive, so
+  existing greps and alerts keep working.
+
 ## [2.2.1] - 2026-08-21
 
 ### Fixed
